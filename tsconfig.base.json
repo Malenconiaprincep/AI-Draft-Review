@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@tutti/draft-doc": ["packages/draft-doc/src/index.ts"],
+      "@tutti/editor-highlight-sdk": ["packages/editor-highlight-sdk/src/index.ts"],
+      "@tutti/ai-assistant-service": ["packages/ai-assistant-service/src/index.ts"],
+      "@tutti/ai-assistant-react": ["packages/ai-assistant-react/src/index.ts"],
+      "@tutti/brand-review-react": ["packages/brand-review-react/src/index.ts"],
+      "@tutti/creator-feedback-react": ["packages/creator-feedback-react/src/index.ts"]
+    }
+  }
+}

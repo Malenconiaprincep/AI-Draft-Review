@@ -1,0 +1,24 @@
+{
+  "name": "@tutti/editor-highlight-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@tutti/draft-doc": "0.1.0"
+  },
+  "peerDependencies": {
+    "@tiptap/core": "3.27.1",
+    "prosemirror-model": "^1.25.3",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-transform": "^1.10.4",
+    "prosemirror-view": "^1.41.0"
+  }
+}

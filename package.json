@@ -1,0 +1,25 @@
+{
+  "name": "tutti-ai-draft-review",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/demo-next run dev",
+    "build": "npm --workspaces --if-present run build",
+    "typecheck": "npm --workspaces --if-present run typecheck",
+    "lint": "npm --workspace apps/demo-next run lint"
+  },
+  "overrides": {
+    "@tiptap/core": "3.27.1",
+    "@tiptap/pm": "3.27.1",
+    "@tiptap/extension-bubble-menu": "3.27.1",
+    "@tiptap/extension-floating-menu": "3.27.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^5.8.3"
+  }
+}

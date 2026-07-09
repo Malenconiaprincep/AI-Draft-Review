@@ -1,0 +1,6 @@
+{
+  "/api/ai-assistant/review/route": "/api/ai-assistant/review",
+  "/_not-found/page": "/_not-found",
+  "/api/demo-assets/[asset]/route": "/api/demo-assets/[asset]",
+  "/page": "/"
+}

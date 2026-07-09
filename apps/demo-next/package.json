@@ -1,0 +1,37 @@
+{
+  "name": "demo-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "lint": "next lint",
+    "typecheck": "tsc -p tsconfig.typecheck.json"
+  },
+  "dependencies": {
+    "@tiptap/core": "3.27.1",
+    "@tiptap/extension-image": "3.27.1",
+    "@tiptap/extension-table": "3.27.1",
+    "@tiptap/extension-table-cell": "3.27.1",
+    "@tiptap/extension-table-header": "3.27.1",
+    "@tiptap/extension-table-row": "3.27.1",
+    "@tiptap/pm": "3.27.1",
+    "@tiptap/react": "3.27.1",
+    "@tiptap/starter-kit": "3.27.1",
+    "@tutti/ai-assistant-react": "0.1.0",
+    "@tutti/brand-review-react": "0.1.0",
+    "@tutti/creator-feedback-react": "0.1.0",
+    "@tutti/ai-assistant-service": "0.1.0",
+    "@tutti/draft-doc": "0.1.0",
+    "@tutti/editor-highlight-sdk": "0.1.0",
+    "next": "^15.3.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6"
+  }
+}
