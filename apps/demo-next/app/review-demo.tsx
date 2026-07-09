@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { AIAssistantPanel, type SuggestionStatus } from "@tutti/ai-assistant-react";
 import {
@@ -273,6 +273,7 @@ export function DraftReviewDemo() {
   const [activeDesk, setActiveDesk] = useState<DemoDesk>("creator");
   const [brandSelectionText, setBrandSelectionText] = useState("");
   const [brandSelectionAnchor, setBrandSelectionAnchor] = useState<BrandSelectionAnchor | null>(null);
+  const brandSelectionStartRef = useRef<number | null>(null);
 
   const highlights = useMemo<EditorHighlight[]>(() => {
     const commentHighlights: EditorHighlight[] = input.openComments.map((comment, index) => ({
@@ -344,7 +345,54 @@ export function DraftReviewDemo() {
   useEffect(() => {
     if (!editor || activeDesk !== "brand" || (workflowStage !== "submitted" && workflowStage !== "resubmitted")) return;
 
-    const updateSelection = () => {
+    const clearSelection = () => {
+      setBrandSelectionText("");
+      setBrandSelectionAnchor(null);
+    };
+
+    const resolveDocPosFromPoint = (clientX: number, clientY: number): number | null => {
+      const coordsPos = editor.view.posAtCoords({ left: clientX, top: clientY });
+      if (coordsPos) return coordsPos.pos;
+
+      const ownerDocument = editor.view.dom.ownerDocument as Document & {
+        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+        caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      };
+
+      const caretPosition = ownerDocument.caretPositionFromPoint?.(clientX, clientY);
+      if (caretPosition && editor.view.dom.contains(caretPosition.offsetNode)) {
+        return editor.view.posAtDOM(caretPosition.offsetNode, caretPosition.offset);
+      }
+
+      const range = ownerDocument.caretRangeFromPoint?.(clientX, clientY);
+      if (range && editor.view.dom.contains(range.startContainer)) {
+        return editor.view.posAtDOM(range.startContainer, range.startOffset);
+      }
+
+      return null;
+    };
+
+    const anchorFromPositions = (start: number, end: number): BrandSelectionAnchor | null => {
+      const from = Math.max(0, Math.min(start, end));
+      const to = Math.min(editor.state.doc.content.size, Math.max(start, end));
+      return to > from ? { from, to } : null;
+    };
+
+    const applyAnchor = (anchor: BrandSelectionAnchor | null) => {
+      if (!anchor) {
+        clearSelection();
+        return;
+      }
+      const text = editor.state.doc.textBetween(anchor.from, anchor.to, " ", " ").replace(/\s+/g, " ").trim();
+      if (!text) {
+        clearSelection();
+        return;
+      }
+      setBrandSelectionText(text);
+      setBrandSelectionAnchor(anchor);
+    };
+
+    const updateNativeSelection = (preferredFrom?: number) => {
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) return;
       const range = selection.getRangeAt(0);
@@ -353,8 +401,7 @@ export function DraftReviewDemo() {
       if (!startsInEditor || !endsInEditor) return;
 
       if (selection.isCollapsed) {
-        setBrandSelectionText("");
-        setBrandSelectionAnchor(null);
+        clearSelection();
         return;
       }
 
@@ -365,12 +412,11 @@ export function DraftReviewDemo() {
       try {
         const start = editor.view.posAtDOM(range.startContainer, range.startOffset);
         const end = editor.view.posAtDOM(range.endContainer, range.endOffset);
-        const from = Math.min(start, end);
-        const to = Math.max(start, end);
-        if (to > from) {
-          const rangeText = editor.state.doc.textBetween(from, to, " ", " ").replace(/\s+/g, " ").trim();
+        const anchor = anchorFromPositions(start, end);
+        if (anchor) {
+          const rangeText = editor.state.doc.textBetween(anchor.from, anchor.to, " ", " ").replace(/\s+/g, " ").trim();
           if (rangeText === selectedText) {
-            preferredAnchor = { from, to };
+            preferredAnchor = anchor;
           }
         }
       } catch {
@@ -387,23 +433,68 @@ export function DraftReviewDemo() {
         located.status === "located" || located.status === "recovered"
           ? { from: located.from, to: located.to }
           : located.status === "ambiguous"
-            ? selectClosestAnchor(located.matches, preferredAnchor?.from)
+            ? selectClosestAnchor(located.matches, preferredAnchor?.from ?? preferredFrom)
             : null;
 
-      if (anchor) {
-        setBrandSelectionText(selectedText);
-        setBrandSelectionAnchor(anchor);
-      }
+      applyAnchor(anchor);
     };
 
-    document.addEventListener("selectionchange", updateSelection);
-    document.addEventListener("mouseup", updateSelection);
-    document.addEventListener("keyup", updateSelection);
+    let animationFrame: number | null = null;
+    const scheduleSelectionUpdate = (callback: () => void) => {
+      if (animationFrame != null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      animationFrame = window.requestAnimationFrame(() => {
+        animationFrame = null;
+        callback();
+      });
+    };
+
+    const handleMouseDown = (event: MouseEvent) => {
+      if (!(event.target instanceof Node) || !editor.view.dom.contains(event.target)) {
+        brandSelectionStartRef.current = null;
+        return;
+      }
+      brandSelectionStartRef.current = resolveDocPosFromPoint(event.clientX, event.clientY);
+    };
+
+    const handleMouseUp = (event: MouseEvent) => {
+      const start = brandSelectionStartRef.current;
+      if (start == null) return;
+      brandSelectionStartRef.current = null;
+      scheduleSelectionUpdate(() => {
+        const selection = window.getSelection();
+        if (selection?.isCollapsed && selection.rangeCount > 0) {
+          const range = selection.getRangeAt(0);
+          if (editor.view.dom.contains(range.startContainer)) {
+            clearSelection();
+            return;
+          }
+        }
+        const end = resolveDocPosFromPoint(event.clientX, event.clientY);
+        if (end == null) {
+          updateNativeSelection(start);
+          return;
+        }
+        applyAnchor(anchorFromPositions(start, end));
+      });
+    };
+
+    const handleKeyUp = () => {
+      scheduleSelectionUpdate(() => updateNativeSelection());
+    };
+
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("mouseup", handleMouseUp);
+    document.addEventListener("keyup", handleKeyUp);
 
     return () => {
-      document.removeEventListener("selectionchange", updateSelection);
-      document.removeEventListener("mouseup", updateSelection);
-      document.removeEventListener("keyup", updateSelection);
+      if (animationFrame != null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener("keyup", handleKeyUp);
     };
   }, [activeDesk, editor, workflowStage]);
 
