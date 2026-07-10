@@ -62,6 +62,7 @@ export const draftReviewInputSchema = z.object({
       status: z.enum(["open", "resolved"]),
       action: z.enum(["comment", "replace"]).optional(),
       suggestedText: z.string().optional(),
+      resolvedText: z.string().optional(),
       messages: z.array(
         z.object({
           id: z.string(),

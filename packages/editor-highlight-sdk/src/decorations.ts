@@ -55,6 +55,9 @@ function locateHighlight(
   doc: ProseMirrorNode,
   highlight: EditorHighlight
 ): { from: number; to: number; status: string } | null {
+  const anchorLocated = locateByAnchor(highlight);
+  if (highlight.preferAnchor && anchorLocated) return anchorLocated;
+
   if (highlight.quotedText) {
     const located = locateQuotedText({
       doc,
@@ -70,9 +73,13 @@ function locateHighlight(
       const first = located.matches[0];
       return first ? { ...first, status: "ambiguous" } : null;
     }
-    return null;
+    return anchorLocated;
   }
 
+  return anchorLocated;
+}
+
+function locateByAnchor(highlight: EditorHighlight): { from: number; to: number; status: string } | null {
   if (
     highlight.anchorFrom != null &&
     highlight.anchorTo != null &&

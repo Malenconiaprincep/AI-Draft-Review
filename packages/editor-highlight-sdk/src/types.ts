@@ -1,6 +1,6 @@
 export type HighlightSource = "ai" | "brand" | "brand-selection";
 
-export type HighlightStatus = "open" | "resolved" | "stale" | "orphaned" | "recovered" | "ambiguous";
+export type HighlightStatus = "open" | "resolved" | "stale" | "orphaned" | "recovered" | "ambiguous" | "focused";
 
 export type EditorHighlight = {
   id: string;
@@ -13,6 +13,7 @@ export type EditorHighlight = {
   blockId?: string;
   label?: string;
   showBadge?: boolean;
+  preferAnchor?: boolean;
 };
 
 export type LocatedAnchor =

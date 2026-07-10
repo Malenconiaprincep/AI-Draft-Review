@@ -93,6 +93,7 @@ export type DraftCommentThread = {
   status: "open" | "resolved";
   action?: "comment" | "replace";
   suggestedText?: string;
+  resolvedText?: string;
   messages: DraftCommentMessage[];
 };
 

@@ -10,6 +10,7 @@
     "dev": "npm --workspace apps/demo-next run dev",
     "build": "npm --workspaces --if-present run build",
     "typecheck": "npm --workspaces --if-present run typecheck",
+    "test": "npm --workspaces --if-present run test",
     "lint": "npm --workspace apps/demo-next run lint"
   },
   "overrides": {

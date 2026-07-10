@@ -14,16 +14,34 @@ export type BrandFeedbackDraftInput = {
   category?: ReviewCategory;
 };
 
+export type BrandRevisionChange = {
+  id?: string;
+  label: string;
+  oldText: string;
+  newText: string;
+};
+
+export type BrandRevisionDiff = {
+  baseVersion?: number | null;
+  revision?: number | null;
+  changes: BrandRevisionChange[];
+};
+
 export type BrandReviewPanelProps = {
   status: BrandReviewStatus;
   campaignName?: string;
   draftVersion?: number;
+  revisionDiff?: BrandRevisionDiff | null;
+  compareChanges?: boolean;
   feedbackDrafts: DraftCommentThread[];
   selectedText?: string;
   selectedFeedbackId?: string | null;
   canApprove?: boolean;
   onSelectFeedback?: (feedbackId: string) => void;
   onClearSelection?: () => void;
+  /** Called when the reviewer begins editing or chooses an action for the selected text. */
+  onFeedbackInteraction?: () => void;
+  onToggleCompareChanges?: () => void;
   onCreateFeedback?: (feedback: BrandFeedbackDraftInput) => Promise<void> | void;
   onRemoveFeedback?: (feedback: DraftCommentThread) => Promise<void> | void;
   onSendFeedback?: (feedback: DraftCommentThread[]) => Promise<void> | void;
@@ -37,7 +55,6 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
   const selectedCardRef = useRef<HTMLElement | null>(null);
   const isReviewing = props.status === "reviewing" || props.status === "resubmitted";
   const hasFeedback = props.feedbackDrafts.length > 0;
-  const canApprove = Boolean(props.canApprove && isReviewing && !hasFeedback);
   const selectedText = props.selectedText?.trim() ?? "";
   const canCreateComment = Boolean(isReviewing && selectedText && body.trim());
   const canCreateReplace = Boolean(isReviewing && selectedText && suggestedText.trim());
@@ -88,12 +105,24 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
 
         {isReviewing ? (
           <>
+            {props.status === "resubmitted" && props.revisionDiff ? (
+              <RevisionDiffPanel
+                compareChanges={Boolean(props.compareChanges)}
+                diff={props.revisionDiff}
+                onToggleCompareChanges={props.onToggleCompareChanges}
+              />
+            ) : null}
+
             <section className="brand-review-section">
               <div className="brand-review-section-head">
                 <h3>反馈对象</h3>
                 <span>{selectedText ? "已选择" : "未选择"}</span>
               </div>
-              <form className="brand-review-form" onSubmit={submitSelectionFeedback}>
+              <form
+                className="brand-review-form"
+                onSubmit={submitSelectionFeedback}
+                onMouseDownCapture={props.onFeedbackInteraction}
+              >
                 <div className={`brand-review-selection ${selectedText ? "" : "empty"}`}>
                   {selectedText ? (
                     <>
@@ -179,20 +208,6 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
                 </div>
               )}
             </section>
-
-            <div className="brand-review-footer">
-              <button
-                className="bulk-btn primary"
-                type="button"
-                disabled={!hasFeedback}
-                onClick={() => void props.onSendFeedback?.(props.feedbackDrafts)}
-              >
-                发送反馈给创作者
-              </button>
-              <button className="bulk-btn approve" type="button" disabled={!canApprove} onClick={() => void props.onApproveDraft?.()}>
-                通过
-              </button>
-            </div>
           </>
         ) : (
           <div className="brand-review-empty">
@@ -202,6 +217,38 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
         )}
       </div>
     </aside>
+  );
+}
+
+function RevisionDiffPanel(props: {
+  compareChanges: boolean;
+  diff: BrandRevisionDiff;
+  onToggleCompareChanges?: () => void;
+}) {
+  const rangeLabel =
+    props.diff.baseVersion && props.diff.revision
+      ? `v${props.diff.baseVersion} → v${props.diff.revision}`
+      : "本轮变更";
+  const changeCount = props.diff.changes.length;
+
+  return (
+    <section className="brand-revision-diff" aria-label="本轮版本变更">
+      <div className="brand-revision-diff-head">
+        <div>
+          <span className="revision-kicker">Changes</span>
+          <h3>{rangeLabel}</h3>
+          <p>{changeCount > 0 ? `${changeCount} 处正文变化，可在左侧稿件中对比查看。` : "未检测到正文变化。"}</p>
+        </div>
+      </div>
+      <button
+        className={`bulk-btn ${props.compareChanges ? "ghost" : "primary"}`}
+        type="button"
+        disabled={changeCount === 0}
+        onClick={() => void props.onToggleCompareChanges?.()}
+      >
+        {props.compareChanges ? "查看当前稿" : "对比 changes"}
+      </button>
+    </section>
   );
 }
 

@@ -10,8 +10,8 @@ export function remapAnchor(
     return { from: null, to: null };
   }
 
-  const from = mapping.map(anchor.from, 1);
-  const to = mapping.map(anchor.to, -1);
+  const from = mapping.map(anchor.from, -1);
+  const to = mapping.map(anchor.to, 1);
   if (to <= from) {
     return { from: null, to: null };
   }

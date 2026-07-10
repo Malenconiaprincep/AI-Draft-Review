@@ -32,6 +32,7 @@ export const CommentHighlight = Extension.create<CommentHighlightOptions>({
             click: (_view, event) => {
               const highlightId = getHighlightIdFromTarget(event.target);
               if (!highlightId) return false;
+              if (this.options.editable && !isBadgeTarget(event.target)) return false;
 
               event.preventDefault();
               event.stopPropagation();
@@ -60,4 +61,9 @@ export function createCommentHighlightExtension(options: CommentHighlightOptions
 function getHighlightIdFromTarget(target: EventTarget | null): string | null {
   if (!(target instanceof Element)) return null;
   return target.closest<HTMLElement>("[data-highlight-id]")?.dataset.highlightId ?? null;
+}
+
+function isBadgeTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest(".tutti-review-badge"));
 }

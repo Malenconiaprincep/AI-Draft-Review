@@ -6,6 +6,7 @@ import { AIAssistantPanel, type SuggestionStatus } from "@tutti/ai-assistant-rea
 import {
   BrandReviewPanel,
   type BrandFeedbackDraftInput,
+  type BrandRevisionDiff,
   type BrandReviewStatus
 } from "@tutti/brand-review-react";
 import { CreatorFeedbackPanel } from "@tutti/creator-feedback-react";
@@ -20,7 +21,8 @@ import {
   type InlineSuggestionProposal,
   type ReviewProposal
 } from "@tutti/draft-doc";
-import { createCommentHighlightExtension, locateQuotedText, type EditorHighlight } from "@tutti/editor-highlight-sdk";
+import { createCommentHighlightExtension, locateQuotedText, remapAnchor, type EditorHighlight } from "@tutti/editor-highlight-sdk";
+import { applyBrandReplacement, getBrandCommentHighlights } from "./review-demo-logic";
 
 const FLOW_STEPS = [
   { title: "写作", copy: "Creator draft" },
@@ -120,6 +122,7 @@ const DEFAULT_EXAMPLE = REVIEW_EXAMPLES[0];
 type DemoDesk = "creator" | "brand";
 type DemoWorkflowStage = "drafting" | "submitted" | "brand_feedback" | "resubmitted" | "approved" | "published";
 type BrandSelectionAnchor = { from: number; to: number };
+type BrandReviewBaseline = { doc: DraftDocJSON; version: number };
 
 type UndoSnapshot = {
   input: DraftReviewInput;
@@ -129,6 +132,10 @@ type UndoSnapshot = {
   activeDesk: DemoDesk;
   brandSelectionText: string;
   brandSelectionAnchor: BrandSelectionAnchor | null;
+  manualDraftEdited: boolean;
+  brandReviewBaseline: BrandReviewBaseline | null;
+  revisionDiff: BrandRevisionDiff | null;
+  compareChanges: boolean;
 };
 
 function createDemoInitialInput(): DraftReviewInput {
@@ -222,6 +229,82 @@ function nodeText(node: DraftDocJSON | DraftNodeJSON): string {
   return node.content?.map((child) => nodeText(child)).join("") ?? "";
 }
 
+function cloneDraftDoc(doc: DraftDocJSON): DraftDocJSON {
+  return JSON.parse(JSON.stringify(doc)) as DraftDocJSON;
+}
+
+function normalizeFeedbackText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function draftDocToDiffBlocks(doc: DraftDocJSON | undefined): Array<{ label: string; text: string }> {
+  return (
+    doc?.content?.map((node, index) => ({
+      label: index === 0 && node.type === "heading" ? "标题" : `段落 ${index}`,
+      text: normalizeFeedbackText(nodeText(node))
+    })) ?? []
+  );
+}
+
+function computeRevisionDiff(params: {
+  baseline: BrandReviewBaseline | null;
+  currentDoc: DraftDocJSON | undefined;
+  currentVersion: number;
+}): BrandRevisionDiff | null {
+  if (!params.currentDoc) return null;
+  if (!params.baseline) {
+    return {
+      baseVersion: null,
+      revision: params.currentVersion,
+      changes: []
+    };
+  }
+
+  const previousBlocks = draftDocToDiffBlocks(params.baseline.doc);
+  const currentBlocks = draftDocToDiffBlocks(params.currentDoc);
+  const max = Math.max(previousBlocks.length, currentBlocks.length);
+  const changes: BrandRevisionDiff["changes"] = [];
+
+  for (let index = 0; index < max; index += 1) {
+    const previous = previousBlocks[index] ?? { label: `段落 ${index}`, text: "" };
+    const current = currentBlocks[index] ?? { label: previous.label, text: "" };
+    if (previous.text === current.text) continue;
+    changes.push({
+      id: `change_${index}`,
+      label: current.text ? current.label : previous.label,
+      oldText: previous.text,
+      newText: current.text
+    });
+  }
+
+  return {
+    baseVersion: params.baseline.version,
+    revision: params.currentVersion,
+    changes
+  };
+}
+
+function getChangedSegments(oldText: string, newText: string) {
+  let start = 0;
+  while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+    start += 1;
+  }
+
+  let oldEnd = oldText.length - 1;
+  let newEnd = newText.length - 1;
+  while (oldEnd >= start && newEnd >= start && oldText[oldEnd] === newText[newEnd]) {
+    oldEnd -= 1;
+    newEnd -= 1;
+  }
+
+  return {
+    prefix: newText.slice(0, start) || oldText.slice(0, start),
+    oldChange: oldText.slice(start, oldEnd + 1),
+    newChange: newText.slice(start, newEnd + 1),
+    suffix: newText.slice(newEnd + 1) || oldText.slice(oldEnd + 1)
+  };
+}
+
 function createBrandFeedbackThread(
   input: DraftReviewInput,
   feedback: BrandFeedbackDraftInput,
@@ -230,12 +313,7 @@ function createBrandFeedbackThread(
 ): DraftCommentThread {
   const body =
     feedback.action === "replace"
-      ? [
-          `建议替换为：${feedback.suggestedText ?? ""}`,
-          feedback.body ? `说明：${feedback.body}` : ""
-        ]
-          .filter(Boolean)
-          .join("\n\n")
+      ? feedback.body.trim() || "请按替换建议调整选中内容。"
       : feedback.body;
 
   return {
@@ -273,18 +351,18 @@ export function DraftReviewDemo() {
   const [activeDesk, setActiveDesk] = useState<DemoDesk>("creator");
   const [brandSelectionText, setBrandSelectionText] = useState("");
   const [brandSelectionAnchor, setBrandSelectionAnchor] = useState<BrandSelectionAnchor | null>(null);
+  const [brandSelectionActivated, setBrandSelectionActivated] = useState(false);
   const brandSelectionStartRef = useRef<number | null>(null);
+  const canEditDraft = activeDesk === "creator" && workflowStage === "brand_feedback";
+  const canEditDraftRef = useRef(canEditDraft);
+  const highlightsRef = useRef<EditorHighlight[]>([]);
+  const [manualDraftEdited, setManualDraftEdited] = useState(false);
+  const [brandReviewBaseline, setBrandReviewBaseline] = useState<BrandReviewBaseline | null>(null);
+  const [revisionDiff, setRevisionDiff] = useState<BrandRevisionDiff | null>(null);
+  const [compareChanges, setCompareChanges] = useState(false);
 
   const highlights = useMemo<EditorHighlight[]>(() => {
-    const commentHighlights: EditorHighlight[] = input.openComments.map((comment, index) => ({
-      id: comment.id,
-      source: "brand",
-      status: comment.status === "open" ? "open" : "resolved",
-      anchorFrom: comment.anchorFrom,
-      anchorTo: comment.anchorTo,
-      quotedText: comment.quotedText,
-      label: `B${index + 1}`
-    }));
+    const commentHighlights: EditorHighlight[] = getBrandCommentHighlights(input.openComments, canEditDraft);
 
     const aiHighlights: EditorHighlight[] =
       proposal?.inlineSuggestions
@@ -306,13 +384,14 @@ export function DraftReviewDemo() {
     const activeBrandSelection: EditorHighlight[] =
       activeDesk === "brand" &&
       (workflowStage === "submitted" || workflowStage === "resubmitted") &&
+      brandSelectionActivated &&
       brandSelectionText &&
       brandSelectionAnchor
         ? [
             {
               id: "brand-active-selection",
               source: "brand-selection",
-              status: "open",
+              status: "focused",
               anchorFrom: brandSelectionAnchor.from,
               anchorTo: brandSelectionAnchor.to,
               quotedText: brandSelectionText,
@@ -322,25 +401,71 @@ export function DraftReviewDemo() {
         : [];
 
     return [...commentHighlights, ...activeBrandSelection, ...aiHighlights];
-  }, [activeDesk, brandSelectionAnchor, brandSelectionText, input, proposal, suggestionStatuses, workflowStage]);
+  }, [
+    activeDesk,
+    brandSelectionAnchor,
+    brandSelectionActivated,
+    brandSelectionText,
+    canEditDraft,
+    input.openComments,
+    proposal,
+    suggestionStatuses,
+    workflowStage
+  ]);
 
   const editor = useEditor(
     {
       editable: false,
       immediatelyRender: false,
+      onUpdate: ({ editor: currentEditor, transaction }) => {
+        if (!transaction.docChanged) return;
+        if (!canEditDraftRef.current) return;
+        const nextDoc = currentEditor.getJSON() as DraftDocJSON;
+        setManualDraftEdited(true);
+        setProposalText(draftDocToEditableText(nextDoc));
+        setInput((current) => ({
+          ...current,
+          draft: {
+            ...current.draft,
+            docJson: nextDoc
+          },
+          openComments: current.openComments.map((comment) => {
+            const nextAnchor = remapAnchor(transaction.mapping, {
+              from: comment.anchorFrom ?? null,
+              to: comment.anchorTo ?? null
+            });
+            return {
+              ...comment,
+              anchorFrom: nextAnchor.from,
+              anchorTo: nextAnchor.to
+            };
+          })
+        }));
+      },
       extensions: [
         ...createDraftDocExtensions(),
         createCommentHighlightExtension({
-          editable: false,
-          getHighlights: () => highlights,
+          editable: canEditDraft,
+          getHighlights: () => highlightsRef.current,
           selectedId: selectedSuggestionId,
           onSelectHighlight: setSelectedSuggestionId
         })
       ],
       content: input.draft.docJson
     },
-    [highlights, selectedSuggestionId, input.draft.docVersion]
+    [canEditDraft, selectedSuggestionId, input.draft.docVersion]
   );
+
+  useEffect(() => {
+    highlightsRef.current = highlights;
+    if (!editor || editor.isDestroyed) return;
+    editor.view.dispatch(editor.state.tr.setMeta("tutti-highlight-refresh", true));
+  }, [editor, highlights]);
+
+  useEffect(() => {
+    canEditDraftRef.current = canEditDraft;
+    editor?.setEditable(canEditDraft);
+  }, [canEditDraft, editor]);
 
   useEffect(() => {
     if (!editor || activeDesk !== "brand" || (workflowStage !== "submitted" && workflowStage !== "resubmitted")) return;
@@ -348,6 +473,7 @@ export function DraftReviewDemo() {
     const clearSelection = () => {
       setBrandSelectionText("");
       setBrandSelectionAnchor(null);
+      setBrandSelectionActivated(false);
     };
 
     const resolveDocPosFromPoint = (clientX: number, clientY: number): number | null => {
@@ -390,6 +516,9 @@ export function DraftReviewDemo() {
       }
       setBrandSelectionText(text);
       setBrandSelectionAnchor(anchor);
+      // A drag only records the target. The visual highlight appears after the
+      // reviewer starts an action in the feedback panel.
+      setBrandSelectionActivated(false);
     };
 
     const updateNativeSelection = (preferredFrom?: number) => {
@@ -514,6 +643,11 @@ export function DraftReviewDemo() {
       setActiveDesk("creator");
       setBrandSelectionText("");
       setBrandSelectionAnchor(null);
+      setBrandSelectionActivated(false);
+      setManualDraftEdited(false);
+      setBrandReviewBaseline(null);
+      setRevisionDiff(null);
+      setCompareChanges(false);
       editor?.commands.setContent(nextInput.draft.docJson ?? { type: "doc", content: [{ type: "paragraph" }] });
     },
     [editor, input.draft.docVersion]
@@ -541,6 +675,11 @@ export function DraftReviewDemo() {
     setActiveDesk("creator");
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
+    setManualDraftEdited(false);
+    setBrandReviewBaseline(null);
+    setRevisionDiff(null);
+    setCompareChanges(false);
     return nextProposal;
   }, []);
 
@@ -552,9 +691,25 @@ export function DraftReviewDemo() {
       workflowStage,
       activeDesk,
       brandSelectionText,
-      brandSelectionAnchor
+      brandSelectionAnchor,
+      manualDraftEdited,
+      brandReviewBaseline,
+      revisionDiff,
+      compareChanges
     });
-  }, [activeDesk, brandSelectionAnchor, brandSelectionText, input, selectedSuggestionId, suggestionStatuses, workflowStage]);
+  }, [
+    activeDesk,
+    brandSelectionAnchor,
+    brandSelectionText,
+    brandReviewBaseline,
+    compareChanges,
+    input,
+    manualDraftEdited,
+    revisionDiff,
+    selectedSuggestionId,
+    suggestionStatuses,
+    workflowStage
+  ]);
 
   const applySuggestion = useCallback(
     (suggestion: InlineSuggestionProposal) => {
@@ -664,8 +819,13 @@ export function DraftReviewDemo() {
     setSelectedSuggestionId(null);
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
+    setManualDraftEdited(false);
+    setBrandReviewBaseline(input.draft.docJson ? { doc: cloneDraftDoc(input.draft.docJson), version: input.draft.docVersion } : null);
+    setRevisionDiff(null);
+    setCompareChanges(false);
     setLastActionMessage("已提交给品牌方，进入品牌审核台。");
-  }, [captureUndo]);
+  }, [captureUndo, input.draft.docJson, input.draft.docVersion]);
 
   const createBrandFeedback = useCallback((feedback: BrandFeedbackDraftInput) => {
     const nextComment = createBrandFeedbackThread(input, feedback, input.openComments.length + 1, brandSelectionAnchor);
@@ -677,6 +837,7 @@ export function DraftReviewDemo() {
     setSelectedSuggestionId(nextComment.id);
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
     setLastActionMessage("已添加一条品牌反馈，尚未发送给创作者。");
   }, [brandSelectionAnchor, captureUndo, input]);
 
@@ -707,26 +868,49 @@ export function DraftReviewDemo() {
       setSelectedSuggestionId(comments[0]?.id ?? null);
       setBrandSelectionText("");
       setBrandSelectionAnchor(null);
+      setBrandSelectionActivated(false);
+      setManualDraftEdited(false);
+      setBrandReviewBaseline(input.draft.docJson ? { doc: cloneDraftDoc(input.draft.docJson), version: input.draft.docVersion } : null);
+      setRevisionDiff(null);
+      setCompareChanges(false);
       setLastActionMessage("品牌反馈已发送给创作者。");
     },
-    [captureUndo]
+    [captureUndo, input.draft.docJson, input.draft.docVersion]
   );
 
   const clearBrandSelection = useCallback(() => {
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
     window.getSelection()?.removeAllRanges();
+  }, []);
+
+  const activateBrandSelection = useCallback(() => {
+    // Run before the browser focuses the right-side control. Clearing the
+    // editor selection after focus would also interrupt the textarea caret.
+    window.getSelection()?.removeAllRanges();
+    setBrandSelectionActivated(true);
   }, []);
 
   const resolveBrandComment = useCallback(
     (comment: DraftCommentThread) => {
       captureUndo();
+      const resolvedText =
+        comment.anchorFrom != null && comment.anchorTo != null && comment.anchorTo > comment.anchorFrom
+          ? normalizeFeedbackText(editor?.state.doc.textBetween(comment.anchorFrom, comment.anchorTo, " ", " ") ?? "")
+          : "";
       setInput((current) => {
         const nextComments = current.openComments.map((item) =>
-          item.id === comment.id ? { ...item, status: "resolved" as const } : item
+          item.id === comment.id
+            ? {
+                ...item,
+                status: "resolved" as const,
+                resolvedText: resolvedText || item.resolvedText
+              }
+            : item
         );
         const nextOpenComment = nextComments.find((item) => item.status === "open");
-        setSelectedSuggestionId(nextOpenComment?.id ?? comment.id);
+        setSelectedSuggestionId(nextOpenComment?.id ?? null);
         return {
           ...current,
           openComments: nextComments
@@ -734,7 +918,7 @@ export function DraftReviewDemo() {
       });
       setLastActionMessage("已标记一条品牌反馈为已处理。");
     },
-    [captureUndo]
+    [captureUndo, editor]
   );
 
   const applyBrandComment = useCallback(
@@ -743,28 +927,24 @@ export function DraftReviewDemo() {
 
       let nextDoc = input.draft.docJson;
       let appliedToDraft = false;
-      if (comment.action === "replace" && comment.suggestedText?.trim() && nextDoc) {
-        const result = applyInlineSuggestionToDraftDoc(nextDoc, {
-          id: comment.id,
-          quotedText: comment.quotedText ?? "",
-          body: comment.messages[comment.messages.length - 1]?.body ?? "",
-          severity: "blocker",
-          category: "general_comment",
-          action: "replace",
-          suggestedText: comment.suggestedText
-        });
-        if (result.applied) {
-          nextDoc = result.doc;
-          appliedToDraft = true;
-        }
-      }
+      let appliedViaEditor = false;
+      const result = applyBrandReplacement({ comment, docJson: nextDoc, editor });
+      nextDoc = result.doc;
+      appliedToDraft = result.applied;
+      appliedViaEditor = result.appliedViaEditor;
 
       setInput((current) => {
         const nextComments = current.openComments.map((item) =>
-          item.id === comment.id ? { ...item, status: "resolved" as const } : item
+          item.id === comment.id
+            ? {
+                ...item,
+                status: "resolved" as const,
+                resolvedText: appliedToDraft && comment.suggestedText ? comment.suggestedText : item.resolvedText
+              }
+            : item
         );
         const nextOpenComment = nextComments.find((item) => item.status === "open");
-        setSelectedSuggestionId(nextOpenComment?.id ?? comment.id);
+        setSelectedSuggestionId(nextOpenComment?.id ?? null);
         return {
           ...current,
           draft:
@@ -781,7 +961,11 @@ export function DraftReviewDemo() {
 
       if (appliedToDraft && nextDoc) {
         setProposalText(draftDocToEditableText(nextDoc));
-        editor?.commands.setContent(nextDoc);
+        if (!appliedViaEditor) {
+          editor?.commands.setContent(nextDoc);
+        }
+        editor?.commands.blur();
+        window.getSelection()?.removeAllRanges();
         setLastActionMessage("已应用品牌替换建议，并生成新的文档版本。");
       } else {
         setLastActionMessage(comment.action === "replace" ? "未能自动应用替换，已标记为已处理。" : "已接受这条品牌反馈。");
@@ -798,7 +982,7 @@ export function DraftReviewDemo() {
           item.id === comment.id ? { ...item, status: "resolved" as const } : item
         );
         const nextOpenComment = nextComments.find((item) => item.status === "open");
-        setSelectedSuggestionId(nextOpenComment?.id ?? comment.id);
+        setSelectedSuggestionId(nextOpenComment?.id ?? null);
         return {
           ...current,
           openComments: nextComments
@@ -809,63 +993,13 @@ export function DraftReviewDemo() {
     [captureUndo]
   );
 
-  const applyAllBrandComments = useCallback(
-    (comments: DraftCommentThread[]) => {
-      if (comments.length === 0) return;
-      captureUndo();
-
-      let nextDoc = input.draft.docJson;
-      let changedDoc = false;
-      comments.forEach((comment) => {
-        if (comment.action !== "replace" || !comment.suggestedText?.trim() || !nextDoc) return;
-        const result = applyInlineSuggestionToDraftDoc(nextDoc, {
-          id: comment.id,
-          quotedText: comment.quotedText ?? "",
-          body: comment.messages[comment.messages.length - 1]?.body ?? "",
-          severity: "blocker",
-          category: "general_comment",
-          action: "replace",
-          suggestedText: comment.suggestedText
-        });
-        if (result.applied) {
-          nextDoc = result.doc;
-          changedDoc = true;
-        }
-      });
-
-      const commentIds = new Set(comments.map((comment) => comment.id));
-      setInput((current) => ({
-        ...current,
-        draft:
-          changedDoc && nextDoc
-            ? {
-                ...current.draft,
-                docJson: nextDoc,
-                docVersion: current.draft.docVersion + 1
-              }
-            : current.draft,
-        openComments: current.openComments.map((item) =>
-          commentIds.has(item.id) ? { ...item, status: "resolved" as const } : item
-        )
-      }));
-
-      setSelectedSuggestionId(comments[0]?.id ?? null);
-      if (changedDoc && nextDoc) {
-        setProposalText(draftDocToEditableText(nextDoc));
-        editor?.commands.setContent(nextDoc);
-      }
-      setLastActionMessage(changedDoc ? "已批量应用品牌反馈，并生成新的文档版本。" : "已批量接受品牌反馈。");
-    },
-    [captureUndo, editor, input.draft.docJson]
-  );
-
   const reopenBrandComment = useCallback(
     (comment: DraftCommentThread) => {
       captureUndo();
       setInput((current) => ({
         ...current,
         openComments: current.openComments.map((item) =>
-          item.id === comment.id ? { ...item, status: "open" as const } : item
+          item.id === comment.id ? { ...item, status: "open" as const, resolvedText: undefined } : item
         )
       }));
       setSelectedSuggestionId(comment.id);
@@ -875,36 +1009,35 @@ export function DraftReviewDemo() {
     [captureUndo]
   );
 
-  const resolveAllBrandComments = useCallback(
-    (comments: DraftCommentThread[]) => {
-      if (comments.length === 0) return;
-      captureUndo();
-      const commentIds = new Set(comments.map((comment) => comment.id));
-      setInput((current) => ({
-        ...current,
-        openComments: current.openComments.map((item) =>
-          commentIds.has(item.id) ? { ...item, status: "resolved" as const } : item
-        )
-      }));
-      setSelectedSuggestionId(comments[0]?.id ?? null);
-      setLastActionMessage("已把所有品牌反馈标记为已处理，可以再次提交。");
-    },
-    [captureUndo]
-  );
-
   const resubmitDraft = useCallback(() => {
     captureUndo();
+    const nextVersion = manualDraftEdited ? input.draft.docVersion + 1 : input.draft.docVersion;
+    const nextRevisionDiff = computeRevisionDiff({
+      baseline: brandReviewBaseline,
+      currentDoc: input.draft.docJson,
+      currentVersion: nextVersion
+    });
     setInput((current) => ({
       ...current,
+      draft: manualDraftEdited
+        ? {
+            ...current.draft,
+            docVersion: nextVersion
+          }
+        : current.draft,
       openComments: []
     }));
+    setRevisionDiff(nextRevisionDiff);
     setWorkflowStage("resubmitted");
     setActiveDesk("brand");
     setSelectedSuggestionId(null);
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
+    setManualDraftEdited(false);
+    setCompareChanges(false);
     setLastActionMessage("已再次提交给品牌方复审。");
-  }, [captureUndo]);
+  }, [brandReviewBaseline, captureUndo, input.draft.docJson, input.draft.docVersion, manualDraftEdited]);
 
   const approveDraft = useCallback(() => {
     captureUndo();
@@ -928,6 +1061,11 @@ export function DraftReviewDemo() {
     setActiveDesk(undoSnapshot.activeDesk);
     setBrandSelectionText(undoSnapshot.brandSelectionText);
     setBrandSelectionAnchor(undoSnapshot.brandSelectionAnchor);
+    setBrandSelectionActivated(false);
+    setManualDraftEdited(undoSnapshot.manualDraftEdited);
+    setBrandReviewBaseline(undoSnapshot.brandReviewBaseline);
+    setRevisionDiff(undoSnapshot.revisionDiff);
+    setCompareChanges(undoSnapshot.compareChanges);
     editor?.commands.setContent(undoSnapshot.input.draft.docJson ?? { type: "doc", content: [{ type: "paragraph" }] });
     setUndoSnapshot(null);
     setLastActionMessage("已撤销上一步操作。");
@@ -958,6 +1096,11 @@ export function DraftReviewDemo() {
     setActiveDesk("creator");
     setBrandSelectionText("");
     setBrandSelectionAnchor(null);
+    setBrandSelectionActivated(false);
+    setManualDraftEdited(false);
+    setBrandReviewBaseline(null);
+    setRevisionDiff(null);
+    setCompareChanges(false);
     editor?.commands.setContent(nextInput.draft.docJson ?? { type: "doc", content: [{ type: "paragraph" }] });
   }, [editor]);
 
@@ -984,12 +1127,19 @@ export function DraftReviewDemo() {
   const isBrandReviewStage = workflowStage === "submitted" || workflowStage === "resubmitted";
   const canSubmitDraft = Boolean(proposal) && pendingAiCount === 0 && workflowStage === "drafting";
   const canResubmitDraft = workflowStage === "brand_feedback" && input.openComments.length > 0 && openBrandFeedbackCount === 0;
+  const canSendBrandFeedback = isBrandReviewStage && input.openComments.length > 0;
+  const canApproveBrandReview = isBrandReviewStage && input.openComments.length === 0;
   const brandReviewStatus = getBrandReviewStatus(workflowStage);
   const reviewStateLabel = getReviewStateLabel({ pendingAiCount, proposal, workflowStage, openBrandFeedbackCount });
   const reviewStateClass = getReviewStateClass(workflowStage, proposal, pendingAiCount, openBrandFeedbackCount);
   const activeFlowIndex = getActiveFlowIndex({ pendingAiCount, proposal, workflowStage, openBrandFeedbackCount });
   const stageProgress = getStageProgress(activeFlowIndex);
   const showScenarioSetup = activeDesk === "creator" && workflowStage === "drafting";
+  const showRevisionCompare =
+    activeDesk === "brand" &&
+    workflowStage === "resubmitted" &&
+    compareChanges &&
+    Boolean(revisionDiff?.changes.length);
   const { stageTitle, stageCopy } = getStageContent({
     pendingAiCount,
     proposal,
@@ -1172,18 +1322,52 @@ export function DraftReviewDemo() {
                     <div className="editor-meta-left">
                       <span>Creator: Demo User</span>
                       <span>Revision {input.draft.docVersion}</span>
+                      {showRevisionCompare && revisionDiff ? (
+                        <span>
+                          Changes v{revisionDiff.baseVersion ?? "?"} → v{revisionDiff.revision ?? input.draft.docVersion}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="editor-meta-right">
-                      <button className="editor-tool-btn" type="button" disabled={editorReviewing || workflowStage !== "drafting"} onClick={runEditorReview}>
-                        <Icon name="spark" />
-                        <span>{editorReviewing ? "Reviewing..." : proposal ? "重新审阅" : "AI Review"}</span>
-                      </button>
-                      <button className="editor-tool-btn primary" type="button" disabled={!canSubmitDraft} onClick={submitDraft}>
-                        提交品牌方
-                      </button>
+                      {workflowStage === "drafting" ? (
+                        <>
+                          <button className="editor-tool-btn" type="button" disabled={editorReviewing} onClick={runEditorReview}>
+                            <Icon name="spark" />
+                            <span>{editorReviewing ? "Reviewing..." : proposal ? "重新审阅" : "AI Review"}</span>
+                          </button>
+                          <button className="editor-tool-btn primary" type="button" disabled={!canSubmitDraft} onClick={submitDraft}>
+                            提交品牌方
+                          </button>
+                        </>
+                      ) : isBrandReviewStage ? (
+                        <>
+                          <button className="editor-tool-btn primary" type="button" disabled={!canSendBrandFeedback} onClick={() => sendBrandFeedback(input.openComments)}>
+                            发送反馈给创作者
+                          </button>
+                          <button className="editor-tool-btn approve" type="button" disabled={!canApproveBrandReview} onClick={approveDraft}>
+                            通过
+                          </button>
+                        </>
+                      ) : workflowStage === "brand_feedback" ? (
+                        <button className="editor-tool-btn primary" type="button" disabled={!canResubmitDraft} onClick={resubmitDraft}>
+                          再次提交
+                        </button>
+                      ) : workflowStage === "approved" ? (
+                        <button className="editor-tool-btn primary" type="button" onClick={publishDraft}>
+                          发布内容
+                        </button>
+                      ) : (
+                        <button className="editor-tool-btn" type="button" disabled>
+                          已发布
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <EditorContent editor={editor} className="draft-viewer editor" />
+                  {showRevisionCompare ? (
+                    <DraftCompareView baseline={brandReviewBaseline} currentDoc={input.draft.docJson} />
+                  ) : (
+                    <EditorContent editor={editor} className="draft-viewer editor" />
+                  )}
                 </div>
 
                 {lastActionMessage ? (
@@ -1203,16 +1387,17 @@ export function DraftReviewDemo() {
                   status={brandReviewStatus}
                   campaignName={input.campaignBrief.name}
                   draftVersion={input.draft.docVersion}
+                  revisionDiff={workflowStage === "resubmitted" ? revisionDiff : null}
+                  compareChanges={compareChanges}
                   feedbackDrafts={isBrandReviewStage ? input.openComments : []}
                   selectedText={isBrandReviewStage ? brandSelectionText : ""}
                   selectedFeedbackId={selectedSuggestionId}
-                  canApprove={isBrandReviewStage && input.openComments.length === 0}
                   onSelectFeedback={setSelectedSuggestionId}
                   onClearSelection={clearBrandSelection}
+                  onFeedbackInteraction={activateBrandSelection}
+                  onToggleCompareChanges={() => setCompareChanges((current) => !current)}
                   onCreateFeedback={createBrandFeedback}
                   onRemoveFeedback={removeBrandFeedback}
-                  onSendFeedback={sendBrandFeedback}
-                  onApproveDraft={approveDraft}
                 />
               ) : workflowStage === "drafting" ? (
                 <AIAssistantPanel
@@ -1233,15 +1418,12 @@ export function DraftReviewDemo() {
                 <CreatorFeedbackPanel
                   comments={input.openComments}
                   selectedCommentId={selectedSuggestionId}
-                  canResubmit={canResubmitDraft}
+                  canResolveManualComments={manualDraftEdited}
                   onSelectComment={setSelectedSuggestionId}
                   onApplyComment={applyBrandComment}
                   onRejectComment={rejectBrandComment}
-                  onApplyAllComments={applyAllBrandComments}
                   onResolveComment={resolveBrandComment}
                   onReopenComment={reopenBrandComment}
-                  onResolveAllComments={resolveAllBrandComments}
-                  onResubmit={resubmitDraft}
                 />
               ) : (
                 <WorkflowStatusPanel
@@ -1268,6 +1450,61 @@ export function DraftReviewDemo() {
         </section>
       </main>
     </div>
+  );
+}
+
+function DraftCompareView({
+  baseline,
+  currentDoc
+}: {
+  baseline: BrandReviewBaseline | null;
+  currentDoc?: DraftDocJSON;
+}) {
+  const previousBlocks = draftDocToDiffBlocks(baseline?.doc);
+  const currentBlocks = draftDocToDiffBlocks(currentDoc);
+  const max = Math.max(previousBlocks.length, currentBlocks.length);
+
+  if (max === 0) {
+    return (
+      <div className="draft-viewer editor draft-compare-view" aria-label="稿件版本对比">
+        <div className="ProseMirror">
+          <p className="muted">暂无可对比内容。</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="draft-viewer editor draft-compare-view" aria-label="稿件版本对比">
+      <div className="ProseMirror">
+        {Array.from({ length: max }, (_, index) => {
+          const previous = previousBlocks[index] ?? { label: `段落 ${index}`, text: "" };
+          const current = currentBlocks[index] ?? { label: previous.label, text: "" };
+          if (!previous.text && !current.text) return null;
+          const content =
+            previous.text === current.text ? (
+              current.text
+            ) : (
+              <InlineArticleDiff oldText={previous.text} newText={current.text} />
+            );
+
+          return index === 0 ? <h1 key={index}>{content}</h1> : <p key={index}>{content}</p>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function InlineArticleDiff({ oldText, newText }: { oldText: string; newText: string }) {
+  const segments = getChangedSegments(oldText, newText);
+
+  return (
+    <>
+      {segments.prefix}
+      {segments.oldChange ? <span className="article-diff-token remove">{segments.oldChange}</span> : null}
+      {segments.newChange ? <span className="article-diff-token add">{segments.newChange}</span> : null}
+      {segments.suffix}
+    </>
   );
 }
 

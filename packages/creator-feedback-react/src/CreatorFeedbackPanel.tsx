@@ -9,13 +9,12 @@ export type CreatorFeedbackPanelProps = {
   comments: DraftCommentThread[];
   selectedCommentId?: string | null;
   canResubmit?: boolean;
+  canResolveManualComments?: boolean;
   onSelectComment?: (commentId: string) => void;
   onApplyComment?: (comment: DraftCommentThread) => Promise<void> | void;
   onRejectComment?: (comment: DraftCommentThread) => Promise<void> | void;
-  onApplyAllComments?: (comments: DraftCommentThread[]) => Promise<void> | void;
   onResolveComment?: (comment: DraftCommentThread) => Promise<void> | void;
   onReopenComment?: (comment: DraftCommentThread) => Promise<void> | void;
-  onResolveAllComments?: (comments: DraftCommentThread[]) => Promise<void> | void;
   onResubmit?: () => Promise<void> | void;
 };
 
@@ -93,8 +92,9 @@ export function CreatorFeedbackPanel(props: CreatorFeedbackPanelProps) {
               comment={comment}
               index={props.comments.findIndex((item) => item.id === comment.id) + 1}
               selected={props.selectedCommentId === comment.id}
+              canResolveManualComment={Boolean(props.canResolveManualComments)}
               onSelect={() => props.onSelectComment?.(comment.id)}
-              onApply={() => void (props.onApplyComment ?? props.onResolveComment)?.(comment)}
+              onApply={() => void props.onApplyComment?.(comment)}
               onReject={() => void (props.onRejectComment ?? props.onResolveComment)?.(comment)}
               onResolve={() => void props.onResolveComment?.(comment)}
               onReopen={() => void props.onReopenComment?.(comment)}
@@ -102,26 +102,6 @@ export function CreatorFeedbackPanel(props: CreatorFeedbackPanelProps) {
           ))
         )}
 
-        {props.comments.length > 0 ? (
-          <div className="creator-feedback-panel__footer">
-            <button
-              className="bulk-btn primary"
-              type="button"
-              disabled={openComments.length === 0}
-              onClick={() => void (props.onApplyAllComments ?? props.onResolveAllComments)?.(openComments)}
-            >
-              全部应用
-            </button>
-            <button
-              className="bulk-btn primary"
-              type="button"
-              disabled={!props.canResubmit || openComments.length > 0}
-              onClick={() => void props.onResubmit?.()}
-            >
-              再次提交
-            </button>
-          </div>
-        ) : null}
       </div>
     </aside>
   );
@@ -151,6 +131,7 @@ function FeedbackCard(props: {
   comment: DraftCommentThread;
   index: number;
   selected: boolean;
+  canResolveManualComment: boolean;
   onSelect: () => void;
   onApply: () => void;
   onReject: () => void;
@@ -160,6 +141,11 @@ function FeedbackCard(props: {
   const refCode = `B${props.index}`;
   const latestMessage = props.comment.messages[props.comment.messages.length - 1];
   const isDone = props.comment.status === "resolved";
+  const isReplace = props.comment.action === "replace" && Boolean(props.comment.suggestedText?.trim());
+  const body = formatFeedbackBody(latestMessage?.body ?? "品牌方留下了一条反馈。");
+  const quotedText = props.comment.quotedText ?? "未定位到原文";
+  const resolvedText = props.comment.resolvedText?.trim();
+  const showManualDiff = Boolean(!isReplace && isDone && resolvedText && normalizeText(resolvedText) !== normalizeText(quotedText));
 
   return (
     <article
@@ -188,18 +174,56 @@ function FeedbackCard(props: {
         <>
           <div className="quote">
             <span>{refCode}</span>
-            {props.comment.quotedText ?? "未定位到原文"}
+            {quotedText}
           </div>
-          <p className="item-copy">{latestMessage?.body ?? "品牌方留下了一条反馈。"}</p>
+          <p className="item-copy">{body}</p>
+          {isReplace ? (
+            <div className="diff" aria-label="品牌替换建议">
+              <div className="diff-row remove">
+                <span className="diff-sign">-</span>
+                <span className="diff-text">{quotedText}</span>
+              </div>
+              <div className="diff-row add">
+                <span className="diff-sign">+</span>
+                <span className="diff-text">{props.comment.suggestedText}</span>
+              </div>
+            </div>
+          ) : null}
+          {showManualDiff ? (
+            <div className="diff" aria-label="创作者修改结果">
+              <div className="diff-row remove">
+                <span className="diff-sign">-</span>
+                <span className="diff-text">{quotedText}</span>
+              </div>
+              <div className="diff-row add">
+                <span className="diff-sign">+</span>
+                <span className="diff-text">{resolvedText}</span>
+              </div>
+            </div>
+          ) : null}
           <div className="item-actions">
             {isDone ? (
               <button className="mini-btn warn" type="button" onClick={(event) => actionClick(event, props.onReopen)}>
                 重新打开
               </button>
-            ) : (
+            ) : isReplace ? (
               <>
                 <button className="mini-btn primary" type="button" onClick={(event) => actionClick(event, props.onApply)}>
                   应用
+                </button>
+                <button className="mini-btn warn" type="button" onClick={(event) => actionClick(event, props.onReject)}>
+                  拒绝
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="mini-btn primary"
+                  type="button"
+                  disabled={!props.canResolveManualComment}
+                  onClick={(event) => actionClick(event, props.onResolve)}
+                >
+                  {props.canResolveManualComment ? "标记完成" : "改稿后完成"}
                 </button>
                 <button className="mini-btn warn" type="button" onClick={(event) => actionClick(event, props.onReject)}>
                   拒绝
@@ -218,4 +242,15 @@ function FeedbackCard(props: {
 function actionClick(event: MouseEvent<HTMLButtonElement>, action: () => void) {
   event.stopPropagation();
   action();
+}
+
+function formatFeedbackBody(body: string) {
+  const explanation = body.match(/说明：([\s\S]*)$/)?.[1]?.trim();
+  if (explanation) return explanation;
+  if (body.startsWith("建议替换为：")) return "请按替换建议调整选中内容。";
+  return body;
+}
+
+function normalizeText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
 }
