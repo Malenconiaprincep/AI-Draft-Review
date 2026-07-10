@@ -11,7 +11,9 @@ const nextConfig = {
     "@tutti/draft-doc",
     "@tutti/editor-highlight-sdk",
     "@tutti/ai-assistant-service",
-    "@tutti/ai-assistant-react"
+    "@tutti/ai-assistant-react",
+    "@tutti/brand-review-react",
+    "@tutti/creator-feedback-react"
   ]
 };
 

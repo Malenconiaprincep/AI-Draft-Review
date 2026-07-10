@@ -1006,6 +1006,11 @@ button:disabled {
   padding-top: 0;
 }
 
+.tutti-ai-panel__run-action {
+  display: flex;
+  margin-bottom: 12px;
+}
+
 .tutti-ai-panel__bulk-actions {
   display: flex;
   align-items: center;

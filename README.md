@@ -14,6 +14,14 @@ apps/demo-next
 
 Demo app 使用本地 fixture 和 React state 演示组件 callbacks。生产环境里的数据、权限、落库和审核状态流转都归宿主系统负责。
 
+## 业务接入文档
+
+- [业务接入指南](docs/INTEGRATION_GUIDE.md)
+- [OpenSpec 对照结果](docs/SPEC_COMPLIANCE.md)
+- [可直接交给 Codex 的业务接入 Prompt](docs/BUSINESS_INTEGRATION_PROMPT.md)
+
+当前推荐通过拉取源码后的 workspace 方式接入。六个包尚未生成私有 npm registry 所需的 `dist` 与独立样式制品，具体差距见 OpenSpec 对照结果。
+
 ## 包说明
 
 ### `@tutti/draft-doc`

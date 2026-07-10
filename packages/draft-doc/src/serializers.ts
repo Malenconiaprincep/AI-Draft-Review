@@ -79,6 +79,8 @@ export function quotedTextFromDocRange(
   from: number,
   to: number
 ): string {
+  // These offsets belong to docJsonToPlainText output. For ProseMirror
+  // absolute positions use quotedTextFromRange from editor-highlight-sdk.
   if (from < 0 || to < from) return "";
   return docPlainText(doc).slice(from, to);
 }

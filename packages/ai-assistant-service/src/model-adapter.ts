@@ -133,7 +133,8 @@ export function resolveProviderConfigFromEnv(env: Record<string, string | undefi
 export function createModelAdapterForProvider(config: LLMProviderConfig): ModelAdapter {
   if (config.provider === "deepseek") return new DeepSeekModelAdapter();
   if (config.provider === "openai_compatible") return new OpenAICompatibleModelAdapter();
-  return new MinimaxModelAdapter();
+  if (config.provider === "minimax") return new MinimaxModelAdapter();
+  throw new Error("Custom providers require an injected modelAdapter.");
 }
 
 async function requestOpenAICompatibleJson(args: {

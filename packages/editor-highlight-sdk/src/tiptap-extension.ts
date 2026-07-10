@@ -1,5 +1,6 @@
 import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "prosemirror-state";
+import type { EditorView } from "prosemirror-view";
 import { buildHighlightDecorations } from "./decorations";
 import type { EditorHighlight } from "./types";
 
@@ -8,6 +9,7 @@ export type CommentHighlightOptions = {
   onSelectHighlight?: (highlightId: string) => void;
   editable?: boolean;
   selectedId?: string | null;
+  getSelectedId?: () => string | null | undefined;
 };
 
 export const commentHighlightPluginKey = new PluginKey("tuttiCommentHighlight");
@@ -45,7 +47,7 @@ export const CommentHighlight = Extension.create<CommentHighlightOptions>({
               doc: state.doc,
               highlights: this.options.getHighlights(),
               editable: Boolean(this.options.editable),
-              selectedId: this.options.selectedId,
+              selectedId: this.options.getSelectedId?.() ?? this.options.selectedId,
               onSelectHighlight: this.options.onSelectHighlight
             })
         }
@@ -56,6 +58,10 @@ export const CommentHighlight = Extension.create<CommentHighlightOptions>({
 
 export function createCommentHighlightExtension(options: CommentHighlightOptions) {
   return CommentHighlight.configure(options);
+}
+
+export function refreshCommentHighlights(view: EditorView) {
+  view.dispatch(view.state.tr.setMeta(commentHighlightPluginKey, true));
 }
 
 function getHighlightIdFromTarget(target: EventTarget | null): string | null {

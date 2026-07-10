@@ -1,4 +1,52 @@
 import { z } from "zod";
+import type { DraftDocJSON, DraftNodeJSON } from "@tutti/draft-doc";
+
+export const supportedDraftNodeTypeSchema = z.enum([
+  "paragraph",
+  "text",
+  "heading",
+  "blockquote",
+  "codeBlock",
+  "bulletList",
+  "orderedList",
+  "listItem",
+  "hardBreak",
+  "horizontalRule",
+  "image",
+  "video",
+  "table",
+  "tableRow",
+  "tableCell",
+  "tableHeader"
+]);
+
+export const supportedDraftMarkTypeSchema = z.enum(["bold", "italic", "strike", "code", "link"]);
+
+const draftMarkSchema = z
+  .object({
+    type: supportedDraftMarkTypeSchema,
+    attrs: z.record(z.unknown()).optional()
+  })
+  .passthrough();
+
+export const draftNodeJsonSchema: z.ZodType<DraftNodeJSON> = z.lazy(() =>
+  z
+    .object({
+      type: supportedDraftNodeTypeSchema,
+      attrs: z.record(z.unknown()).optional(),
+      content: z.array(draftNodeJsonSchema).optional(),
+      text: z.string().optional(),
+      marks: z.array(draftMarkSchema).optional()
+    })
+    .passthrough()
+);
+
+export const draftDocJsonSchema: z.ZodType<DraftDocJSON> = z
+  .object({
+    type: z.literal("doc"),
+    content: z.array(draftNodeJsonSchema).optional()
+  })
+  .passthrough();
 
 export const reviewCategorySchema = z.enum([
   "brand_cta",
@@ -13,14 +61,33 @@ export const reviewCategorySchema = z.enum([
   "general_comment"
 ]);
 
-export const draftReviewInputSchema = z.object({
-  draft: z.object({
+const draftInputSchema = z
+  .object({
     postStateId: z.string().min(1),
     draftKind: z.enum(["url", "doc"]),
-    draftUrl: z.string().optional(),
-    docJson: z.any().optional(),
+    draftUrl: z.string().min(1).optional(),
+    docJson: draftDocJsonSchema.optional(),
     docVersion: z.number().int().nonnegative()
-  }),
+  })
+  .superRefine((draft, context) => {
+    if (draft.draftKind === "doc" && !draft.docJson) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["docJson"],
+        message: "docJson is required when draftKind is 'doc'."
+      });
+    }
+    if (draft.draftKind === "url" && !draft.draftUrl) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["draftUrl"],
+        message: "draftUrl is required when draftKind is 'url'."
+      });
+    }
+  });
+
+export const draftReviewInputSchema = z.object({
+  draft: draftInputSchema,
   campaignBrief: z.object({
     campaignId: z.string().min(1),
     name: z.string().optional(),

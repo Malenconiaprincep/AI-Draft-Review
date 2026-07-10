@@ -15,6 +15,7 @@ export type AIAssistantPanelProps = {
   selectedSuggestionId?: string | null;
   suggestionStatuses?: Record<string, SuggestionStatus>;
   canUndo?: boolean;
+  showRunReviewAction?: boolean;
   onRunReview: (input: DraftReviewInput) => Promise<ReviewProposal>;
   onSelectSuggestion?: (suggestionId: string) => void;
   onApplySuggestion?: (suggestion: InlineSuggestionProposal) => Promise<void> | void;
@@ -99,8 +100,25 @@ export function AIAssistantPanel(props: AIAssistantPanelProps) {
       </div>
 
       <div className="tutti-ai-panel__body panel-body">
+        {props.showRunReviewAction !== false ? (
+          <div className="tutti-ai-panel__run-action">
+            <button
+              className="bulk-btn primary"
+              type="button"
+              disabled={status === "reviewing"}
+              onClick={() => void assistant.runReview()}
+            >
+              {status === "reviewing" ? "审阅中…" : proposal ? "重新审阅" : "运行 AI Review"}
+            </button>
+          </div>
+        ) : null}
+
         {status === "idle" && !proposal ? (
           <div className="tutti-ai-panel__empty">暂无 AI 审稿建议。</div>
+        ) : null}
+
+        {status === "reviewing" && !proposal ? (
+          <div className="tutti-ai-panel__empty">正在分析当前稿件…</div>
         ) : null}
 
         {status === "error" ? (

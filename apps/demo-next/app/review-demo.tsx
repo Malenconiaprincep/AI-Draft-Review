@@ -21,7 +21,13 @@ import {
   type InlineSuggestionProposal,
   type ReviewProposal
 } from "@tutti/draft-doc";
-import { createCommentHighlightExtension, locateQuotedText, remapAnchor, type EditorHighlight } from "@tutti/editor-highlight-sdk";
+import {
+  createCommentHighlightExtension,
+  locateQuotedText,
+  refreshCommentHighlights,
+  remapAnchor,
+  type EditorHighlight
+} from "@tutti/editor-highlight-sdk";
 import { applyBrandReplacement, getBrandCommentHighlights } from "./review-demo-logic";
 
 const FLOW_STEPS = [
@@ -356,6 +362,7 @@ export function DraftReviewDemo() {
   const canEditDraft = activeDesk === "creator" && workflowStage === "brand_feedback";
   const canEditDraftRef = useRef(canEditDraft);
   const highlightsRef = useRef<EditorHighlight[]>([]);
+  const selectedHighlightIdRef = useRef<string | null>(null);
   const [manualDraftEdited, setManualDraftEdited] = useState(false);
   const [brandReviewBaseline, setBrandReviewBaseline] = useState<BrandReviewBaseline | null>(null);
   const [revisionDiff, setRevisionDiff] = useState<BrandRevisionDiff | null>(null);
@@ -447,20 +454,21 @@ export function DraftReviewDemo() {
         createCommentHighlightExtension({
           editable: canEditDraft,
           getHighlights: () => highlightsRef.current,
-          selectedId: selectedSuggestionId,
+          getSelectedId: () => selectedHighlightIdRef.current,
           onSelectHighlight: setSelectedSuggestionId
         })
       ],
       content: input.draft.docJson
     },
-    [canEditDraft, selectedSuggestionId, input.draft.docVersion]
+    [canEditDraft, input.draft.docVersion]
   );
 
   useEffect(() => {
     highlightsRef.current = highlights;
+    selectedHighlightIdRef.current = selectedSuggestionId;
     if (!editor || editor.isDestroyed) return;
-    editor.view.dispatch(editor.state.tr.setMeta("tutti-highlight-refresh", true));
-  }, [editor, highlights]);
+    refreshCommentHighlights(editor.view);
+  }, [editor, highlights, selectedSuggestionId]);
 
   useEffect(() => {
     canEditDraftRef.current = canEditDraft;
@@ -1403,6 +1411,7 @@ export function DraftReviewDemo() {
                 <AIAssistantPanel
                   input={input}
                   proposal={proposal}
+                  showRunReviewAction={false}
                   selectedSuggestionId={selectedSuggestionId}
                   suggestionStatuses={suggestionStatuses}
                   canUndo={Boolean(undoSnapshot)}

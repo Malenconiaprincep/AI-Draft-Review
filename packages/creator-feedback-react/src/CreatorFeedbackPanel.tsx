@@ -13,8 +13,10 @@ export type CreatorFeedbackPanelProps = {
   onSelectComment?: (commentId: string) => void;
   onApplyComment?: (comment: DraftCommentThread) => Promise<void> | void;
   onRejectComment?: (comment: DraftCommentThread) => Promise<void> | void;
+  onApplyAllComments?: (comments: DraftCommentThread[]) => Promise<void> | void;
   onResolveComment?: (comment: DraftCommentThread) => Promise<void> | void;
   onReopenComment?: (comment: DraftCommentThread) => Promise<void> | void;
+  onResolveAllComments?: (comments: DraftCommentThread[]) => Promise<void> | void;
   onResubmit?: () => Promise<void> | void;
 };
 
@@ -101,6 +103,41 @@ export function CreatorFeedbackPanel(props: CreatorFeedbackPanelProps) {
             />
           ))
         )}
+
+        {props.onApplyAllComments || props.onResolveAllComments || props.onResubmit ? (
+          <div className="brand-review-footer">
+            {props.onApplyAllComments ? (
+              <button
+                className="bulk-btn primary"
+                type="button"
+                disabled={openComments.length === 0}
+                onClick={() => void props.onApplyAllComments?.(openComments)}
+              >
+                全部应用
+              </button>
+            ) : null}
+            {props.onResolveAllComments ? (
+              <button
+                className="bulk-btn ghost"
+                type="button"
+                disabled={openComments.length === 0}
+                onClick={() => void props.onResolveAllComments?.(openComments)}
+              >
+                全部标记完成
+              </button>
+            ) : null}
+            {props.onResubmit ? (
+              <button
+                className="bulk-btn approve"
+                type="button"
+                disabled={!props.canResubmit || openComments.length > 0}
+                onClick={() => void props.onResubmit?.()}
+              >
+                再次提交
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
       </div>
     </aside>

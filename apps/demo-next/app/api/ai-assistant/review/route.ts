@@ -1,8 +1,7 @@
 import { reviewDraft, resolveProviderConfigFromEnv } from "@tutti/ai-assistant-service";
-import type { DraftReviewInput } from "@tutti/draft-doc";
 
 export async function POST(request: Request) {
-  const input = (await request.json()) as DraftReviewInput;
+  const input: unknown = await request.json();
   const providerConfig = resolveProviderConfigFromEnv(process.env);
 
   try {

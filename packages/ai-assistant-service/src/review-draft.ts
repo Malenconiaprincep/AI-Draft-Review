@@ -9,7 +9,7 @@ export type ReviewDraftOptions = {
 };
 
 export async function reviewDraft(
-  rawInput: DraftReviewInput,
+  rawInput: unknown,
   options: ReviewDraftOptions = {}
 ): Promise<ReviewProposal> {
   const input = draftReviewInputSchema.parse(rawInput) as DraftReviewInput;

@@ -55,6 +55,7 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
   const selectedCardRef = useRef<HTMLElement | null>(null);
   const isReviewing = props.status === "reviewing" || props.status === "resubmitted";
   const hasFeedback = props.feedbackDrafts.length > 0;
+  const canApprove = Boolean(props.canApprove && isReviewing && !hasFeedback);
   const selectedText = props.selectedText?.trim() ?? "";
   const canCreateComment = Boolean(isReviewing && selectedText && body.trim());
   const canCreateReplace = Boolean(isReviewing && selectedText && suggestedText.trim());
@@ -208,6 +209,31 @@ export function BrandReviewPanel(props: BrandReviewPanelProps) {
                 </div>
               )}
             </section>
+
+            {props.onSendFeedback || props.onApproveDraft ? (
+              <div className="brand-review-footer">
+                {props.onSendFeedback ? (
+                  <button
+                    className="bulk-btn primary"
+                    type="button"
+                    disabled={!hasFeedback}
+                    onClick={() => void props.onSendFeedback?.(props.feedbackDrafts)}
+                  >
+                    发送反馈给创作者
+                  </button>
+                ) : null}
+                {props.onApproveDraft ? (
+                  <button
+                    className="bulk-btn approve"
+                    type="button"
+                    disabled={!canApprove}
+                    onClick={() => void props.onApproveDraft?.()}
+                  >
+                    通过
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </>
         ) : (
           <div className="brand-review-empty">
