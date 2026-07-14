@@ -16,6 +16,7 @@
     "baseUrl": ".",
     "paths": {
       "@tutti/draft-doc": ["packages/draft-doc/src/index.ts"],
+      "@tutti/content-import": ["packages/content-import/src/index.ts"],
       "@tutti/editor-highlight-sdk": ["packages/editor-highlight-sdk/src/index.ts"],
       "@tutti/ai-assistant-service": ["packages/ai-assistant-service/src/index.ts"],
       "@tutti/ai-assistant-react": ["packages/ai-assistant-react/src/index.ts"],

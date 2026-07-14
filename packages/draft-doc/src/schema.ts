@@ -34,6 +34,33 @@ export const Video = Node.create({
   }
 });
 
+export const Audio = Node.create({
+  name: "audio",
+  group: "block",
+  atom: true,
+
+  addAttributes() {
+    return {
+      src: { default: null },
+      title: { default: null }
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: "audio[src]" }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return [
+      "audio",
+      mergeAttributes(HTMLAttributes, {
+        controls: "",
+        preload: "metadata"
+      })
+    ];
+  }
+});
+
 export function createDraftDocExtensions() {
   return [
     StarterKit.configure({
@@ -46,6 +73,7 @@ export function createDraftDocExtensions() {
       allowBase64: false
     }),
     Video,
+    Audio,
     Table.configure({
       resizable: false
     }),

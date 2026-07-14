@@ -19,6 +19,11 @@ Demo app 使用本地 fixture 和 React state 演示组件 callbacks。生产环
 - [业务接入指南](docs/INTEGRATION_GUIDE.md)
 - [OpenSpec 对照结果](docs/SPEC_COMPLIANCE.md)
 - [可直接交给 Codex 的业务接入 Prompt](docs/BUSINESS_INTEGRATION_PROMPT.md)
+- [Typefully 多平台发布调研与 X 首版方案](docs/TYPEFULLY_X_PUBLISH_RESEARCH.md)
+- [Notion 导入授权指南](docs/NOTION_IMPORT_AUTH_GUIDE.md)
+- [飞书导入授权指南](docs/FEISHU_IMPORT_AUTH_GUIDE.md)
+- [YouMind 个人导入授权指南](docs/YOUMIND_IMPORT_AUTH_GUIDE.md)
+- [Google Docs 个人授权、列表与导入指南](docs/GOOGLE_DOCS_IMPORT_AUTH_GUIDE.md)
 
 当前推荐通过拉取源码后的 workspace 方式接入。六个包尚未生成私有 npm registry 所需的 `dist` 与独立样式制品，具体差距见 OpenSpec 对照结果。
 
@@ -96,6 +101,10 @@ npm run dev
 ```
 
 打开 [http://localhost:3000](http://localhost:3000)。
+
+内容导入 Demo 位于 [http://localhost:3000/import-demo](http://localhost:3000/import-demo)，支持
+Notion MCP、飞书 OAuth、YouMind 个人 OpenAPI Key 和 Google Picker；Google Docs 使用 `drive.file` 单篇授权，不读取用户完整 Drive 列表。
+平台授权配置见上方四份导入指南。
 
 Demo 的 AI Review 只走真实 LLM provider；没有配置 LLM key 时，API route 会返回配置错误。
 页面里内置了几组 campaign context / creator draft 测试样例，可以直接点选后运行 AI Review。真实接入时，完整宣发计划、品牌工具包、发布规范等动态 proposal 应放进 `campaignContext`；`campaignBrief` 只是可选结构化摘要，不再是必填唯一依据。AI 建议处理完后，可以提交给品牌方，在品牌方审核台添加反馈或通过；反馈发送给创作者后，创作者可处理并再次提交。

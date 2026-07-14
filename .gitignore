@@ -6,3 +6,5 @@ coverage
 .env.local
 .turbo
 *.tsbuildinfo
+.local/
+apps/demo-next/google-picker.config.local.json

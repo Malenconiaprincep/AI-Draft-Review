@@ -8,9 +8,10 @@
     "build": "next build",
     "lint": "next lint",
     "typecheck": "tsc -p tsconfig.typecheck.json",
-    "test": "node --test app/review-demo-logic.test.ts"
+    "test": "node --test app/review-demo-logic.test.ts lib/google-docs-demo.test.ts lib/local-import-assets.test.ts lib/youmind-demo.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tiptap/core": "3.27.1",
     "@tiptap/extension-image": "3.27.1",
     "@tiptap/extension-table": "3.27.1",
@@ -21,9 +22,10 @@
     "@tiptap/react": "3.27.1",
     "@tiptap/starter-kit": "3.27.1",
     "@tutti/ai-assistant-react": "0.1.0",
-    "@tutti/brand-review-react": "0.1.0",
-    "@tutti/creator-feedback-react": "0.1.0",
     "@tutti/ai-assistant-service": "0.1.0",
+    "@tutti/brand-review-react": "0.1.0",
+    "@tutti/content-import": "0.1.0",
+    "@tutti/creator-feedback-react": "0.1.0",
     "@tutti/draft-doc": "0.1.0",
     "@tutti/editor-highlight-sdk": "0.1.0",
     "next": "^15.3.4",

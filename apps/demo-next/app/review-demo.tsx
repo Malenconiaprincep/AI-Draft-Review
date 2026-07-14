@@ -1175,6 +1175,10 @@ export function DraftReviewDemo() {
             <Icon name="document" />
             品牌方端
           </button>
+          <a className="nav-btn" href="/import-demo">
+            <Icon name="folder" />
+            内容导入 Demo
+          </a>
         </nav>
 
         <section className="sidebar-section">
