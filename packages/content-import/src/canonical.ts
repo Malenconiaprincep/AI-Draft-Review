@@ -6,6 +6,9 @@ const SUPPORTED_NODES = new Set([
   "heading",
   "blockquote",
   "codeBlock",
+  "callout",
+  "toggle",
+  "toggleSummary",
   "bulletList",
   "orderedList",
   "listItem",
@@ -13,6 +16,8 @@ const SUPPORTED_NODES = new Set([
   "tableRow",
   "tableCell",
   "tableHeader",
+  "columns",
+  "column",
   "image",
   "video",
   "audio",
@@ -64,15 +69,37 @@ export function canonicalNodeToDraftNode(node: CanonicalNode): DraftNodeJSON | n
     attrs.level = Math.min(3, Math.max(1, level));
   }
 
-  const content = node.content?.flatMap((child) => {
+  const sourceContent = node.type === "table"
+    ? node.content?.filter((child) => !isCanonicalTableDelimiterRow(child))
+    : node.content;
+  let content = sourceContent?.flatMap((child) => {
     const converted = canonicalNodeToDraftNode(child);
     return converted ? [converted] : [];
   });
+  if (node.type === "listItem" && content?.[0]?.type !== "paragraph") {
+    content = [{ type: "paragraph" }, ...(content ?? [])];
+  }
+  if (node.type === "column" && !content?.length) {
+    content = [{ type: "paragraph" }];
+  }
+  if (node.type === "callout" && !content?.length) {
+    content = [{ type: "paragraph" }];
+  }
+  if (node.type === "toggle" && !content?.length) {
+    content = [{ type: "toggleSummary" }, { type: "paragraph" }];
+  }
 
   const result: DraftNodeJSON = { type: node.type };
   if (Object.keys(attrs).length > 0) result.attrs = attrs;
   if (content && content.length > 0) result.content = content;
   return result;
+}
+
+function isCanonicalTableDelimiterRow(node: CanonicalNode): boolean {
+  if (node.type !== "tableRow" || !node.content?.length) return false;
+  const values = node.content.map((cell) => canonicalNodeText(cell).trim());
+  const delimiters = values.map((value) => /^:?-{3,}:?$/.test(value));
+  return delimiters.some(Boolean) && values.every((value, index) => !value || delimiters[index]);
 }
 
 export function canonicalNodeText(node: CanonicalNode): string {

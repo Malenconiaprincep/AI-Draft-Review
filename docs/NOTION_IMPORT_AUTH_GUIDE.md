@@ -23,8 +23,8 @@ https://mcp.notion.com/mcp
 2. 打开 [http://localhost:3000/import-demo](http://localhost:3000/import-demo)。
 3. 选择 Notion，点击 `Connect Notion via MCP`。
 4. 在 Notion 官方授权页登录并确认授权。
-5. 授权完成后自动回到 Demo。
-6. 粘贴 Notion 页面链接并点击“测试真实文档”。
+5. 授权完成后自动回到 Demo，并自动获取最近修改的页面。
+6. 选择页面并点击“导入选中文档”。
 
 授权取消、`state` 校验失败或 MCP 暂时不可用时，Demo 会显示对应错误，不会保存 Token。
 
@@ -58,6 +58,8 @@ POST /api/content-import/preview
 - 浏览器只持有随机、HttpOnly、SameSite=Lax 的 Session ID。
 - Token 不进入客户端 JavaScript、URL、日志或 Git。
 - Demo 会话最多保留 12 小时，服务重启后自动丢失。
+
+本地开发可以显式设置 `NOTION_DEV_LOCAL_STORAGE=true`。开启后，页面还会显示一个二次确认开关；勾选时才会把 MCP Token 与动态客户端信息写入当前浏览器 localStorage，并在本地服务重启后恢复服务端会话。生产构建会强制禁用这条路径。
 
 生产环境必须改成服务端加密持久化，并关联 Tutti 用户、Notion 工作区、动态 MCP Client 和 Token 版本；还需要支持刷新 Token 原子轮换、断开连接、撤销和审计。
 

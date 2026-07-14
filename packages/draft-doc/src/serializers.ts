@@ -5,13 +5,18 @@ const BLOCK_TYPES = new Set([
   "heading",
   "blockquote",
   "codeBlock",
+  "callout",
+  "toggle",
+  "toggleSummary",
   "bulletList",
   "orderedList",
   "listItem",
   "table",
   "tableRow",
   "tableCell",
-  "tableHeader"
+  "tableHeader",
+  "columns",
+  "column"
 ]);
 
 const ATOM_BLOCK_LABELS: Record<string, string> = {
@@ -147,6 +152,12 @@ function textFromNode(node: DraftNodeJSON | DraftDocJSON): string {
     return `${childText.trimEnd()}\n`;
   }
   if (node.type === "table") {
+    return `${childText}\n`;
+  }
+  if (node.type === "column") {
+    return `${childText.trimEnd()}\n`;
+  }
+  if (node.type === "columns") {
     return `${childText}\n`;
   }
   return childText;

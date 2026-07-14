@@ -2,15 +2,16 @@
 
 import { createDraftDocExtensions, docJsonToPlainText, emptyDraftDoc, type DraftDocJSON, type DraftNodeJSON } from "@tutti/draft-doc";
 import { EditorContent, useEditor } from "@tiptap/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   openGoogleDocsPicker,
   prepareGoogleDocsPicker,
   type GooglePickerConfig,
   type PickedGoogleDocument
 } from "../../lib/google-picker-client";
+import { analyzeImportSource, detectImportProvider, type ImportProvider } from "./content-import-ui";
 
-type Provider = "notion" | "feishu" | "youmind" | "googledocs";
+type Provider = ImportProvider;
 
 type DemoSettings = {
   liveAvailable: Record<Provider, boolean>;
@@ -20,6 +21,7 @@ type DemoSettings = {
       available: boolean;
       connected: boolean;
       accountName?: string;
+      devLocalStorageAvailable: boolean;
     };
     feishu: {
       transport: "mcp";
@@ -111,10 +113,19 @@ type YouMindFileSummary = {
   lastEditedAt?: string;
 };
 
+type WorkspaceDocument = {
+  id: string;
+  provider: Provider;
+  title: string;
+  source: string;
+  updatedAt?: string;
+  meta: string;
+};
+
 const DEFAULT_SETTINGS: DemoSettings = {
   liveAvailable: { notion: false, feishu: false, youmind: false, googledocs: false },
   connections: {
-    notion: { transport: "mcp", available: true, connected: false },
+    notion: { transport: "mcp", available: true, connected: false, devLocalStorageAvailable: false },
     feishu: {
       transport: "mcp",
       available: false,
@@ -133,6 +144,9 @@ const DEFAULT_SETTINGS: DemoSettings = {
   }
 };
 
+const NOTION_DEV_PERSISTENCE_PREFERENCE = "tutti_notion_dev_persist_enabled";
+const NOTION_DEV_SESSION_STORAGE = "tutti_notion_dev_session";
+
 export function ContentImportDemo() {
   const [provider, setProvider] = useState<Provider>("notion");
   const [settings, setSettings] = useState<DemoSettings>(DEFAULT_SETTINGS);
@@ -144,7 +158,11 @@ export function ContentImportDemo() {
   const [notionPages, setNotionPages] = useState<NotionPageSummary[]>([]);
   const [notionPagesStatus, setNotionPagesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [notionPagesMessage, setNotionPagesMessage] = useState("点击“获取页面”后才会请求 Notion MCP。");
-  const [feishuQuery, setFeishuQuery] = useState("");
+  const [notionDevPersistenceEnabled, setNotionDevPersistenceEnabled] = useState(false);
+  const [notionDevPersistenceHydrated, setNotionDevPersistenceHydrated] = useState(false);
+  const [notionDevPersistenceMessage, setNotionDevPersistenceMessage] = useState("开发凭据尚未写入此浏览器。");
+  const notionDevRestoreAttempted = useRef(false);
+  const [feishuQuery, setFeishuQuery] = useState("最近修改的文档");
   const [feishuDocuments, setFeishuDocuments] = useState<FeishuDocumentSummary[]>([]);
   const [feishuDocumentsStatus, setFeishuDocumentsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [feishuDocumentsMessage, setFeishuDocumentsMessage] = useState("输入标题关键词，搜索当前飞书账号有权访问的文档。");
@@ -162,6 +180,16 @@ export function ContentImportDemo() {
   const [googlePickerPreparationError, setGooglePickerPreparationError] = useState("");
   const [googlePickerConfig, setGooglePickerConfig] = useState<GooglePickerConfig>();
   const [selectedGoogleDocument, setSelectedGoogleDocument] = useState<PickedGoogleDocument | undefined>();
+  const [googleDocumentsStatus, setGoogleDocumentsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [googleDocumentsMessage, setGoogleDocumentsMessage] = useState("授权后自动读取已选择的 Google Docs。");
+  const [sourceFilter, setSourceFilter] = useState<Provider | "all">("all");
+  const [importEntryMode, setImportEntryMode] = useState<"workspace" | "link">("workspace");
+  const [workspaceQuery, setWorkspaceQuery] = useState("");
+  const [workspaceSearchExpanded, setWorkspaceSearchExpanded] = useState(false);
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [showConnections, setShowConnections] = useState(false);
+  const bindingMenuRef = useRef<HTMLDivElement>(null);
+  const workspaceSearchRef = useRef<HTMLDivElement>(null);
 
   const editor = useEditor({
     editable: false,
@@ -197,6 +225,123 @@ export function ContentImportDemo() {
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     }
   }, []);
+
+  useEffect(() => {
+    setNotionDevPersistenceEnabled(window.localStorage.getItem(NOTION_DEV_PERSISTENCE_PREFERENCE) !== "0");
+    setNotionDevPersistenceHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (
+      sourceFilter !== "all"
+      && sourceFilter !== "googledocs"
+      && !settings.connections[sourceFilter].connected
+    ) setSourceFilter("all");
+  }, [settings.connections, sourceFilter]);
+
+  useEffect(() => {
+    if (!showConnections) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!bindingMenuRef.current?.contains(event.target as Node)) setShowConnections(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowConnections(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [showConnections]);
+
+  useEffect(() => {
+    if (!workspaceSearchExpanded) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!workspaceSearchRef.current?.contains(event.target as Node)) setWorkspaceSearchExpanded(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setWorkspaceSearchExpanded(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [workspaceSearchExpanded]);
+
+  useEffect(() => {
+    if (
+      !notionDevPersistenceHydrated
+      || !settings.connections.notion.devLocalStorageAvailable
+      || !notionDevPersistenceEnabled
+    ) return;
+
+    let cancelled = false;
+    const syncDevSession = async () => {
+      if (settings.connections.notion.connected) {
+        const result = await fetch("/api/connectors/notion/dev-session", { cache: "no-store" });
+        if (!result.ok) return;
+        const snapshot = await result.json();
+        window.localStorage.setItem(NOTION_DEV_SESSION_STORAGE, JSON.stringify(snapshot));
+        if (!cancelled) setNotionDevPersistenceMessage("开发凭据已保存到此浏览器，刷新或重启服务后可恢复。");
+        return;
+      }
+
+      if (notionDevRestoreAttempted.current) return;
+      const serialized = window.localStorage.getItem(NOTION_DEV_SESSION_STORAGE);
+      if (!serialized) return;
+      notionDevRestoreAttempted.current = true;
+      setNotionDevPersistenceMessage("正在从此浏览器恢复 Notion 开发凭据…");
+      const result = await fetch("/api/connectors/notion/dev-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: serialized
+      });
+      if (!result.ok) {
+        window.localStorage.removeItem(NOTION_DEV_SESSION_STORAGE);
+        if (!cancelled) setNotionDevPersistenceMessage("本地开发凭据已失效，请重新连接 Notion。");
+        return;
+      }
+      const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
+      if (!settingsResult.ok || cancelled) return;
+      setSettings(await settingsResult.json() as DemoSettings);
+      setMessage("已从 localStorage 恢复 Notion 开发会话，正在自动获取页面。");
+      setNotionDevPersistenceMessage("开发凭据已从此浏览器恢复。");
+    };
+    void syncDevSession().catch(() => {
+      if (!cancelled) setNotionDevPersistenceMessage("同步本地开发凭据失败，请重新连接 Notion。");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    notionDevPersistenceEnabled,
+    notionDevPersistenceHydrated,
+    settings.connections.notion.connected,
+    settings.connections.notion.devLocalStorageAvailable
+  ]);
+
+  useEffect(() => {
+    if (!settings.connections.notion.connected) return;
+    void loadNotionPages("最近修改的页面");
+  }, [settings.connections.notion.connected]);
+
+  useEffect(() => {
+    if (!settings.connections.feishu.connected) return;
+    void loadFeishuDocuments("最近修改的文档");
+  }, [settings.connections.feishu.connected]);
+
+  useEffect(() => {
+    if (!settings.connections.youmind.connected) return;
+    void loadYouMindBoards();
+  }, [settings.connections.youmind.connected]);
+
+  useEffect(() => {
+    if (!settings.connections.googledocs.connected) return;
+    void loadGoogleDocuments();
+  }, [settings.connections.googledocs.connected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -275,7 +420,17 @@ export function ContentImportDemo() {
     setMessage(`已切换到 ${providerLabel(nextProvider)} 连接器。`);
   };
 
-  const loadNotionPages = async (query = notionQuery) => {
+  const updateSource = (nextSource: string) => {
+    setSource(nextSource);
+    setResponse(null);
+    const detectedProvider = detectImportProvider(nextSource);
+    if (!detectedProvider) return;
+    if (detectedProvider !== provider) setProvider(detectedProvider);
+    setStatus("idle");
+    setMessage(`已自动识别为 ${providerLabel(detectedProvider)} 文档。`);
+  };
+
+  async function loadNotionPages(query = notionQuery) {
     const normalizedQuery = query.trim();
     if (!normalizedQuery) {
       setNotionPagesStatus("error");
@@ -298,6 +453,22 @@ export function ContentImportDemo() {
       setNotionPages([]);
       setNotionPagesStatus("error");
       setNotionPagesMessage(error instanceof Error ? error.message : "读取 Notion 页面列表失败。");
+    }
+  }
+
+  const toggleNotionDevPersistence = (enabled: boolean) => {
+    setNotionDevPersistenceEnabled(enabled);
+    notionDevRestoreAttempted.current = false;
+    window.localStorage.setItem(NOTION_DEV_PERSISTENCE_PREFERENCE, enabled ? "1" : "0");
+    if (enabled) {
+      setNotionDevPersistenceMessage(
+        settings.connections.notion.connected
+          ? "正在把当前 Notion 开发凭据保存到此浏览器…"
+          : "下次连接 Notion 后会把开发凭据保存到此浏览器。"
+      );
+    } else {
+      window.localStorage.removeItem(NOTION_DEV_SESSION_STORAGE);
+      setNotionDevPersistenceMessage("已关闭并清除此浏览器中的 Notion 开发凭据。");
     }
   };
 
@@ -363,7 +534,7 @@ export function ContentImportDemo() {
     if (!boardId) {
       setYouMindFilesStatus("error");
       setYouMindFilesMessage("请先选择一个 YouMind Board。");
-      return;
+      return false;
     }
     setYouMindFilesStatus("loading");
     setYouMindFilesMessage("正在通过 YouMind OpenAPI 读取文件…");
@@ -377,10 +548,12 @@ export function ContentImportDemo() {
       setYouMindFiles(files);
       setYouMindFilesStatus("ready");
       setYouMindFilesMessage(files.length ? `找到 ${files.length} 个 article 文档。` : "这个 Board 中没有匹配的 article 文档。");
+      return true;
     } catch (error) {
       setYouMindFiles([]);
       setYouMindFilesStatus("error");
       setYouMindFilesMessage(error instanceof Error ? error.message : "读取 YouMind 文件失败。");
+      return false;
     }
   };
 
@@ -414,9 +587,11 @@ export function ContentImportDemo() {
       const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
       setSettings(await settingsResult.json() as DemoSettings);
       setSelectedGoogleDocument(pickerResult.document);
+      setGoogleDocumentsStatus("ready");
+      setGoogleDocumentsMessage(`已读取「${pickerResult.document.name}」。`);
       setSource(pickerResult.document.url);
-      setStatus("ready");
-      setMessage(`已通过 Google Picker 选择「${pickerResult.document.name}」，可以导入。`);
+      setMessage(`已选择「${pickerResult.document.name}」，正在生成预览…`);
+      await runImport(pickerResult.document.url, "googledocs");
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Google Picker 打开失败。");
@@ -425,11 +600,31 @@ export function ContentImportDemo() {
     }
   };
 
+  const loadGoogleDocuments = async () => {
+    setGoogleDocumentsStatus("loading");
+    setGoogleDocumentsMessage("正在读取 Google Picker 已授权的文档…");
+    try {
+      const result = await fetch("/api/connectors/google-docs/documents", { cache: "no-store" });
+      const payload = await result.json() as { documents?: PickedGoogleDocument[]; error?: string };
+      if (!result.ok) throw new Error(payload.error || `Google Docs 列表请求失败：${result.status}`);
+      const document = payload.documents?.[0];
+      setSelectedGoogleDocument(document);
+      setGoogleDocumentsStatus("ready");
+      setGoogleDocumentsMessage(document ? `已读取「${document.name}」。` : "当前授权中没有可读取的 Google Docs。");
+    } catch (error) {
+      setSelectedGoogleDocument(undefined);
+      setGoogleDocumentsStatus("error");
+      setGoogleDocumentsMessage(error instanceof Error ? error.message : "读取 Google Docs 失败。");
+    }
+  };
+
   const disconnectGoogleDocs = async () => {
     await fetch("/api/connectors/google-docs/authorize", { method: "DELETE" });
     const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
     setSettings(await settingsResult.json() as DemoSettings);
     setSelectedGoogleDocument(undefined);
+    setGoogleDocumentsStatus("idle");
+    setGoogleDocumentsMessage("授权后自动读取已选择的 Google Docs。");
     setSource("");
     setStatus("idle");
     setMessage("Google Docs 已断开，服务端会话中的 Token 已清除。");
@@ -500,24 +695,25 @@ export function ContentImportDemo() {
     setMessage("YouMind 已断开，服务端会话中的 API Key 已清除。");
   };
 
-  const runImport = async (overrideSource?: string) => {
+  const runImport = async (overrideSource?: string, overrideProvider?: Provider) => {
     setStatus("loading");
     setMessage("正在读取真实平台文档并转换格式…");
     setResponse(null);
     const requestSource = overrideSource ?? source;
+    const requestProvider = overrideProvider ?? provider;
 
     try {
       const result = await fetch("/api/content-import/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, source: requestSource, mode: "live" })
+        body: JSON.stringify({ provider: requestProvider, source: requestSource, mode: "live" })
       });
       const payload = (await result.json()) as PreviewResponse & { error?: string; code?: string };
       if (!result.ok) throw new Error(payload.error || `请求失败：${result.status}`);
       setResponse(payload);
       setStatus("ready");
       setMessage(
-        `${providerLabel(provider)} 导入完成：${payload.result.doc.content?.length ?? 0} 个顶层 Block，${payload.result.assets.length} 个待转存素材。`
+        `${providerLabel(requestProvider)} 导入完成：${payload.result.doc.content?.length ?? 0} 个顶层 Block，${payload.result.assets.length} 个待转存素材。`
       );
     } catch (error) {
       setStatus("error");
@@ -530,7 +726,543 @@ export function ContentImportDemo() {
   const feishuConnection = settings.connections.feishu;
   const youMindConnection = settings.connections.youmind;
   const googleDocsConnection = settings.connections.googledocs;
+  const detectedProvider = detectImportProvider(source);
   const result = response?.result;
+  const providers: Provider[] = ["notion", "feishu", "youmind", "googledocs"];
+  const connectedCount = providers.filter((item) => settings.connections[item].connected).length;
+  const workspaceDocuments = useMemo<WorkspaceDocument[]>(() => [
+    ...notionPages.map((page) => ({
+      id: `notion-${page.id}`,
+      provider: "notion" as const,
+      title: page.title,
+      source: page.url,
+      updatedAt: page.timestamp,
+      meta: page.highlight || formatNotionPageDate(page.timestamp)
+    })),
+    ...feishuDocuments.map((document) => ({
+      id: `feishu-${document.id}`,
+      provider: "feishu" as const,
+      title: document.title,
+      source: document.url || document.id,
+      updatedAt: document.lastEditedAt,
+      meta: formatDocumentDate(document.lastEditedAt, "飞书文档")
+    })),
+    ...youMindFiles.map((file) => ({
+      id: `youmind-${file.id}`,
+      provider: "youmind" as const,
+      title: file.title,
+      source: file.url || file.id,
+      updatedAt: file.lastEditedAt,
+      meta: `${file.kind || "article"} · ${formatDocumentDate(file.lastEditedAt, "无更新时间")}`
+    })),
+    ...(selectedGoogleDocument ? [{
+      id: `googledocs-${selectedGoogleDocument.id}`,
+      provider: "googledocs" as const,
+      title: selectedGoogleDocument.name,
+      source: selectedGoogleDocument.url,
+      meta: "Google Picker 已授权"
+    }] : [])
+  ], [notionPages, feishuDocuments, youMindFiles, selectedGoogleDocument]);
+  const filteredDocuments = useMemo(() => {
+    const normalizedQuery = workspaceQuery.trim().toLocaleLowerCase();
+    return workspaceDocuments.filter((document) => {
+      const matchesProvider = sourceFilter === "all" || document.provider === sourceFilter;
+      const matchesQuery = !normalizedQuery || `${document.title} ${document.meta}`.toLocaleLowerCase().includes(normalizedQuery);
+      return matchesProvider && matchesQuery;
+    });
+  }, [workspaceDocuments, sourceFilter, workspaceQuery]);
+  const libraryLinkAnalysis = importEntryMode === "link" ? analyzeImportSource(libraryQuery) : null;
+  const libraryLinkState = !libraryLinkAnalysis?.provider || libraryLinkAnalysis.resourceType === "unsupported"
+    ? "blocked"
+    : settings.connections[libraryLinkAnalysis.provider].connected
+      ? "ready"
+      : "authorization";
+  const libraryLoading =
+    (notionConnection.connected && notionPagesStatus === "loading")
+    || (feishuConnection.connected && feishuDocumentsStatus === "loading")
+    || (youMindConnection.connected && youMindFilesStatus === "loading")
+    || (googleDocsConnection.connected && googleDocumentsStatus === "loading");
+  const libraryLoadError = [
+    notionConnection.connected && notionPagesStatus === "error" ? notionPagesMessage : "",
+    feishuConnection.connected && feishuDocumentsStatus === "error" ? feishuDocumentsMessage : "",
+    youMindConnection.connected && youMindFilesStatus === "error" ? youMindFilesMessage : "",
+    googleDocsConnection.connected && googleDocumentsStatus === "error" ? googleDocumentsMessage : ""
+  ].find(Boolean);
+
+  const chooseWorkspaceDocument = (document: WorkspaceDocument) => {
+    setProvider(document.provider);
+    setSource(document.source);
+    setLibraryQuery("");
+    void runImport(document.source, document.provider);
+  };
+
+  const analyzeAndImportLink = async () => {
+    const normalizedCandidate = libraryQuery.trim();
+    if (!normalizedCandidate) {
+      setResponse(null);
+      setStatus("error");
+      setMessage("请输入要导入的文档链接。");
+      return;
+    }
+    const analysis = analyzeImportSource(normalizedCandidate);
+    if (!analysis) {
+      setResponse(null);
+      setStatus("error");
+      setMessage("链接格式不正确，请输入完整的 Notion、飞书、YouMind 或 Google Docs 文档地址。");
+      return;
+    }
+    if (!analysis.provider || analysis.resourceType === "unsupported") {
+      setSource("");
+      setResponse(null);
+      setStatus("error");
+      setMessage(analysis.message);
+      return;
+    }
+
+    setProvider(analysis.provider);
+    if (!settings.connections[analysis.provider].connected) {
+      setResponse(null);
+      setStatus("idle");
+      setMessage(`已识别 ${providerLabel(analysis.provider)}，请先完成来源绑定。`);
+      setShowConnections(true);
+      return;
+    }
+
+    if (analysis.resourceType === "container") {
+      if (analysis.provider !== "youmind" || !analysis.resourceId) {
+        setStatus("error");
+        setMessage(analysis.message);
+        return;
+      }
+      setSource("");
+      setResponse(null);
+      setSourceFilter("youmind");
+      setYouMindBoardId(analysis.resourceId);
+      setStatus("loading");
+      setMessage("正在打开 YouMind Board 并读取其中的文章…");
+      const loaded = await loadYouMindFiles(analysis.resourceId, "");
+      if (loaded) {
+        setImportEntryMode("workspace");
+        setWorkspaceQuery("");
+        setStatus("ready");
+        setMessage("已打开 YouMind Board，请选择其中一篇文章进行预览。");
+      } else {
+        setStatus("error");
+        setMessage("YouMind Board 打开失败，请检查访问权限后重试。");
+      }
+      return;
+    }
+
+    setSource(normalizedCandidate);
+    await runImport(normalizedCandidate, analysis.provider);
+  };
+
+  const switchImportEntryMode = (nextMode: "workspace" | "link") => {
+    if (nextMode === importEntryMode) return;
+    setImportEntryMode(nextMode);
+    setWorkspaceSearchExpanded(false);
+    setSource("");
+    setResponse(null);
+    setStatus("idle");
+    setMessage(nextMode === "link" ? "粘贴文档或 Board 链接，系统会自动识别来源与权限。" : "请从已绑定的工作区中选择一篇文档。");
+  };
+
+  const linkNeedsAuthorization = Boolean(
+    libraryLinkAnalysis?.provider && !settings.connections[libraryLinkAnalysis.provider].connected
+  );
+  const linkCanContinue = Boolean(
+    libraryLinkAnalysis?.provider && libraryLinkAnalysis.resourceType !== "unsupported"
+  );
+  const googlePickerAction = importEntryMode === "workspace" && sourceFilter === "googledocs" && !result;
+  const primaryActionLabel = (() => {
+    if (status === "loading") return "处理中…";
+    if (result) return "确认导入";
+    if (googlePickerAction) return "添加 Google Docs 到列表";
+    if (importEntryMode === "link") {
+      if (linkNeedsAuthorization) return "去授权";
+      if (libraryLinkAnalysis?.resourceType === "container") return "打开 Board";
+      return "分析并预览";
+    }
+    return "确认导入";
+  })();
+  const primaryActionDisabled = status === "loading"
+    || (googlePickerAction
+      ? googlePickerPreparation !== "ready"
+      : importEntryMode === "link" ? !linkCanContinue : !result);
+
+  const runPrimaryAction = () => {
+    if (result) {
+      setStatus("ready");
+      setMessage(`已确认导入「${result.title}」。`);
+      return;
+    }
+    if (googlePickerAction) {
+      setProvider("googledocs");
+      void chooseGoogleDocument();
+      return;
+    }
+    if (importEntryMode === "link") void analyzeAndImportLink();
+  };
+
+  const showWorkspaceLayout = true;
+  if (showWorkspaceLayout) return (
+    <main className="import-demo-shell import-workspace-shell">
+      <section className="import-workspace-layout">
+        <aside className="import-library-panel">
+          <header className="import-panel-title">
+            <h1>选择导入文档</h1>
+            <a href="/">返回审阅</a>
+          </header>
+
+          <div className="import-binding-menu" ref={bindingMenuRef}>
+            <button
+              className={`import-binding-trigger ${showConnections ? "active" : ""}`}
+              type="button"
+              aria-expanded={showConnections}
+              aria-controls="import-connection-drawer"
+              onClick={() => setShowConnections((current) => !current)}
+            >
+              <span aria-hidden="true">↗</span>
+              <strong>全部来源 · {connectedCount} 个已绑定</strong>
+              <span className="import-binding-chevron" aria-hidden="true">⌄</span>
+            </button>
+
+            {showConnections ? (
+              <section id="import-connection-drawer" className="import-connection-drawer" aria-label="管理来源绑定">
+              <div className="import-connection-tabs" role="tablist" aria-label="选择要管理的平台">
+                {providers.map((item) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={provider === item}
+                    className={provider === item ? "active" : ""}
+                    onClick={() => setProvider(item)}
+                    key={item}
+                  >
+                    <ProviderIcon provider={item} />
+                    <span>{providerLabel(item)}</span>
+                    <i className={settings.connections[item].connected ? "connected" : ""} />
+                  </button>
+                ))}
+              </div>
+
+              <div className="import-connection-action">
+                {provider === "notion" ? (
+                  <>
+                    <div>
+                      <strong>{notionConnection.accountName || "Notion 工作区"}</strong>
+                      <small>{notionConnection.connected ? "已绑定，可读取授权页面" : "通过官方 MCP OAuth 绑定"}</small>
+                    </div>
+                    <a href="/api/connectors/notion/authorize">
+                      {notionConnection.connected ? "重新绑定" : "绑定"}
+                    </a>
+                  </>
+                ) : provider === "feishu" ? (
+                  <>
+                    <div>
+                      <strong>{feishuConnection.accountName || "飞书文档"}</strong>
+                      <small>{feishuConnection.connected ? "已绑定当前用户文档" : "绑定后可搜索个人文档"}</small>
+                    </div>
+                    {feishuConnection.mode === "dynamic-app" && !feishuConnection.connected ? (
+                      <button type="button" onClick={() => void startFeishuRegistration()}>扫码绑定</button>
+                    ) : (
+                      <a className={feishuConnection.available ? "" : "disabled"} href="/api/connectors/feishu/authorize">
+                        {feishuConnection.connected ? "重新绑定" : "绑定"}
+                      </a>
+                    )}
+                  </>
+                ) : provider === "googledocs" ? (
+                  <>
+                    <div>
+                      <strong>{googleDocsConnection.accountName || "Google Docs"}</strong>
+                      <small>{selectedGoogleDocument ? `已选择「${selectedGoogleDocument.name}」` : "使用官方 Picker 授权单篇文档"}</small>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={googlePickerStatus === "loading" || googlePickerPreparation !== "ready"}
+                      onClick={() => void chooseGoogleDocument()}
+                    >
+                      {googlePickerStatus === "loading" ? "打开中…" : "添加到列表"}
+                    </button>
+                  </>
+                ) : youMindConnection.connected ? (
+                  <>
+                    <div>
+                      <strong>{youMindConnection.accountName || "YouMind"}</strong>
+                      <small>已通过 OpenAPI 绑定个人工作区</small>
+                    </div>
+                    <button type="button" onClick={() => void loadYouMindBoards()}>刷新</button>
+                  </>
+                ) : youMindConnection.mode === "server-key" ? (
+                  <>
+                    <div><strong>YouMind</strong><small>服务端已配置访问凭据</small></div>
+                    <button type="button" onClick={() => void connectYouMind()}>绑定</button>
+                  </>
+                ) : (
+                  <div className="import-inline-key">
+                    <input
+                      type="password"
+                      aria-label="YouMind API Key"
+                      value={youMindApiKey}
+                      onChange={(event) => setYouMindApiKey(event.target.value)}
+                      placeholder="输入 YouMind API Key"
+                    />
+                    <button type="button" disabled={!youMindApiKey.trim()} onClick={() => void connectYouMind()}>绑定</button>
+                  </div>
+                )}
+              </div>
+
+              {provider === "notion" && notionConnection.devLocalStorageAvailable ? (
+                <label className="import-dev-persistence compact">
+                  <input
+                    type="checkbox"
+                    checked={notionDevPersistenceEnabled}
+                    onChange={(event) => toggleNotionDevPersistence(event.target.checked)}
+                  />
+                  <span><strong>在此浏览器保存开发凭据</strong><small>{notionDevPersistenceMessage}</small></span>
+                </label>
+              ) : null}
+              </section>
+            ) : null}
+          </div>
+
+          <div className="import-entry-tabs" role="tablist" aria-label="选择文档添加方式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={importEntryMode === "workspace"}
+              className={importEntryMode === "workspace" ? "active" : ""}
+              onClick={() => switchImportEntryMode("workspace")}
+            >
+              从工作区选择
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={importEntryMode === "link"}
+              className={importEntryMode === "link" ? "active" : ""}
+              onClick={() => switchImportEntryMode("link")}
+            >
+              粘贴链接
+            </button>
+          </div>
+
+          {importEntryMode === "link" ? (
+            <>
+              <div className="import-library-search-row single">
+                <label className={detectImportProvider(libraryQuery) ? "detected" : ""}>
+                  <span aria-hidden="true">⌕</span>
+                  <input
+                    value={libraryQuery}
+                    onChange={(event) => setLibraryQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && linkCanContinue) {
+                        event.preventDefault();
+                        runPrimaryAction();
+                      }
+                    }}
+                    placeholder="粘贴 Notion、飞书、YouMind 或 Google Docs 链接"
+                    aria-label="要导入的文档链接"
+                    inputMode="url"
+                    autoComplete="off"
+                  />
+                  {detectImportProvider(libraryQuery) ? (
+                    <span className="import-search-provider"><ProviderIcon provider={detectImportProvider(libraryQuery)!} /></span>
+                  ) : null}
+                </label>
+              </div>
+
+              {libraryLinkAnalysis ? (
+                <div className={`import-link-analysis ${libraryLinkState}`} role="status">
+                  <span>{libraryLinkState === "ready" ? "✓" : "!"}</span>
+                  <div>
+                    <strong>{libraryLinkAnalysis.resourceLabel}</strong>
+                    <small>
+                      {libraryLinkState === "authorization"
+                        ? `已识别 ${libraryLinkAnalysis.provider ? providerLabel(libraryLinkAnalysis.provider) : "文档来源"}，继续前需要先完成绑定。`
+                        : libraryLinkAnalysis.resourceType === "container"
+                          ? "已识别 Board，点击右下角“打开 Board”后选择其中的文章。"
+                          : libraryLinkAnalysis.importable
+                            ? "链接有效，点击右下角“分析并预览”读取文档。"
+                            : libraryLinkAnalysis.message}
+                    </small>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="import-filter-toolbar">
+              <div className="import-filter-row" role="tablist" aria-label="文档来源筛选">
+                <button type="button" className={sourceFilter === "all" ? "active" : ""} onClick={() => setSourceFilter("all")}>全部</button>
+                {providers.filter((item) => item === "googledocs" || settings.connections[item].connected).map((item) => (
+                  <button
+                    type="button"
+                    className={sourceFilter === item ? "active" : ""}
+                    onClick={() => {
+                      setSourceFilter(item);
+                      setProvider(item);
+                    }}
+                    key={item}
+                  >
+                    {providerLabel(item)}
+                  </button>
+                ))}
+              </div>
+
+              <div
+                className={`import-workspace-search-control ${workspaceSearchExpanded ? "expanded" : ""}`}
+                ref={workspaceSearchRef}
+              >
+                <button
+                  type="button"
+                  className={`import-workspace-search-toggle ${workspaceSearchExpanded ? "active" : ""} ${workspaceQuery ? "has-query" : ""}`}
+                  aria-expanded={workspaceSearchExpanded}
+                  aria-controls="workspace-document-search"
+                  onClick={() => setWorkspaceSearchExpanded((expanded) => !expanded)}
+                >
+                  <span aria-hidden="true">⌕</span>
+                  Search
+                </button>
+                {workspaceSearchExpanded ? (
+                  <div className="import-workspace-search-popover" id="workspace-document-search" role="search">
+                    <div className="import-library-search-row single">
+                      <label>
+                        <span aria-hidden="true">⌕</span>
+                        <input
+                          value={workspaceQuery}
+                          onChange={(event) => setWorkspaceQuery(event.target.value)}
+                          placeholder="搜索已授权工作区中的文档"
+                          aria-label="搜索工作区文档"
+                          autoFocus
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {importEntryMode === "workspace" ? <div className="import-document-library" role="list" aria-label="可导入文档">
+            {filteredDocuments.length ? filteredDocuments.map((document) => (
+              <button
+                type="button"
+                role="listitem"
+                className={source === document.source ? "selected" : ""}
+                onClick={() => chooseWorkspaceDocument(document)}
+                key={document.id}
+              >
+                <ProviderIcon provider={document.provider} />
+                <span className="import-document-copy">
+                  <strong>{document.title}</strong>
+                  <small>
+                    来源：{providerLabel(document.provider)}
+                    <b>·</b>
+                    {document.meta}
+                  </small>
+                </span>
+                {source === document.source ? <span className="import-selected-check">✓</span> : null}
+              </button>
+            )) : (
+              <div className="import-library-empty">
+                <span>{libraryLoading ? "↻" : libraryLoadError ? "!" : "⌕"}</span>
+                <strong>{libraryLoading ? "正在加载已授权文档…" : libraryLoadError ? "文档列表加载失败" : "暂无可浏览的文档"}</strong>
+                <small>
+                  {libraryLoading
+                    ? "进入页面后会自动读取已授权平台中的文档。"
+                    : libraryLoadError || (connectedCount ? "已完成自动拉取，当前没有可显示的文档。" : "先绑定一个内容来源，即可在这里浏览文档。")}
+                </small>
+                {!connectedCount ? <button type="button" onClick={() => setShowConnections(true)}>管理绑定</button> : null}
+              </div>
+            )}
+          </div> : null}
+
+          {importEntryMode === "workspace" && provider === "youmind" && youMindConnection.connected && youMindBoards.length ? (
+            <label className="import-board-select">
+              <span>当前 YouMind Board</span>
+              <select
+                value={youMindBoardId}
+                onChange={(event) => {
+                  setYouMindBoardId(event.target.value);
+                  void loadYouMindFiles(event.target.value, "");
+                }}
+              >
+                {youMindBoards.map((board) => <option value={board.id} key={board.id}>{board.name}</option>)}
+              </select>
+            </label>
+          ) : null}
+
+          <div className={`import-feedback import-library-feedback ${status}`} role="status" aria-live="polite">
+            <span>{statusIcon(status)}</span>
+            <p>{message}</p>
+          </div>
+
+          <footer className="import-library-actions">
+            <button
+              type="button"
+              onClick={() => {
+                setSource("");
+                setWorkspaceQuery("");
+                setLibraryQuery("");
+                setResponse(null);
+                setStatus("idle");
+                setMessage("已取消当前选择，请重新选择文档。");
+              }}
+            >
+              取消
+            </button>
+            <button
+              className="primary"
+              type="button"
+              disabled={primaryActionDisabled}
+              onClick={runPrimaryAction}
+            >
+              {primaryActionLabel}
+            </button>
+          </footer>
+        </aside>
+
+        <section className="import-workspace-preview">
+          <header className="import-preview-heading">
+            <h2>导入预览</h2>
+            {status === "loading" ? <span>正在读取文档…</span> : null}
+          </header>
+
+          <div className={`import-preview-canvas ${result ? "has-content" : status === "loading" ? "loading" : "empty"}`}>
+            {result ? (
+              <>
+                <div className="import-preview-document-header">
+                  <h1>{result.title}</h1>
+                  <div>
+                    <span><ProviderIcon provider={result.source.provider} /> 来源：{providerLabel(result.source.provider)}</span>
+                    <span>更新时间：{formatDocumentDate(result.sourceLastEditedAt, "刚刚")}</span>
+                    <span>包含：正文 / 列表 / 表格 / 图片</span>
+                  </div>
+                </div>
+                <EditorContent editor={editor} className="import-preview-editor import-workspace-editor" />
+              </>
+            ) : status === "loading" ? (
+              <div className="import-preview-loading" role="status" aria-live="polite">
+                <span className="import-preview-spinner" aria-hidden="true" />
+                <strong>{googlePickerStatus === "loading" ? "正在打开文件选择器…" : "正在生成文档预览…"}</strong>
+                <span>{message}</span>
+              </div>
+            ) : (
+              <div className="import-empty-state">
+                <div className="import-empty-icon">↗</div>
+                <strong>选择一篇文档开始预览</strong>
+                <span>可以浏览已绑定工作区，也可以直接粘贴文档链接。</span>
+              </div>
+            )}
+          </div>
+
+          <footer className="import-preview-meta">
+            {result ? <span>{stats.characters.toLocaleString()} 字 · {stats.blocks} 个块</span> : <span>支持 Notion、飞书、YouMind 与 Google Docs</span>}
+          </footer>
+        </section>
+      </section>
+    </main>
+  );
 
   return (
     <main className="import-demo-shell">
@@ -549,7 +1281,35 @@ export function ContentImportDemo() {
 
       <section className="import-demo-grid">
         <aside className="import-control-card">
-          <div className="import-step-label">01 · 选择来源</div>
+          <div className="import-step-label">01 · 添加文档</div>
+          <label className="import-field import-link-field">
+            <span>粘贴文档链接，自动识别来源</span>
+            <div className={`import-link-input ${detectedProvider ? "detected" : ""}`}>
+              <input
+                value={source}
+                onChange={(event) => updateSource(event.target.value)}
+                placeholder="粘贴 Notion、飞书、YouMind 或 Google Docs 链接"
+                inputMode="url"
+                autoComplete="off"
+              />
+              <span className={`import-detection-badge ${detectedProvider ? "ready" : ""}`}>
+                {detectedProvider ? (
+                  <>
+                    <ProviderIcon provider={detectedProvider} />
+                    已识别 {providerLabel(detectedProvider)}
+                  </>
+                ) : "自动识别"}
+              </span>
+            </div>
+            <small>
+              {source.trim() && !detectedProvider
+                ? "暂未识别该链接，请检查地址，或从下方工作区选择。"
+                : "识别后会自动切换到对应连接器，无需提前选择平台。"}
+            </small>
+          </label>
+
+          <div className="import-path-divider"><span>或者</span></div>
+          <div className="import-step-label">02 · 从工作区选择</div>
           <div className="import-provider-tabs" role="tablist" aria-label="内容平台">
             {(["notion", "feishu", "youmind", "googledocs"] as Provider[]).map((item) => (
               <button
@@ -561,21 +1321,13 @@ export function ContentImportDemo() {
                 onClick={() => selectProvider(item)}
               >
                 <ProviderIcon provider={item} />
-                <span>{providerLabel(item)}</span>
+                <span className="import-provider-copy">
+                  <strong>{providerLabel(item)}</strong>
+                  <small>{providerConnectionLabel(item, settings)}</small>
+                </span>
               </button>
             ))}
           </div>
-
-          <label className="import-field">
-            <span>文档链接</span>
-            <textarea
-              value={source}
-              rows={4}
-              readOnly={provider === "googledocs"}
-              onChange={(event) => setSource(event.target.value)}
-              placeholder={provider === "googledocs" ? "通过 Google Picker 选择文档" : `粘贴 ${providerLabel(provider)} 文档链接`}
-            />
-          </label>
 
           {provider === "notion" && notionConnection.connected ? (
             <section className="import-notion-picker" aria-labelledby="notion-page-picker-title">
@@ -787,7 +1539,7 @@ export function ContentImportDemo() {
             </section>
           ) : null}
 
-          <div className="import-step-label">02 · 运行连接器</div>
+          <div className="import-step-label">03 · 授权并导入</div>
           {provider === "notion" ? (
             <a
               className={`import-oauth-button ${notionConnection.connected ? "connected" : ""}`}
@@ -852,9 +1604,7 @@ export function ContentImportDemo() {
                     ? "Google 授权不可用"
                     : googlePickerStatus === "loading"
                   ? "正在打开 Google Picker…"
-                  : googleDocsConnection.connected
-                    ? "重新选择 Google Docs"
-                    : "连接 Google"}
+                  : "添加 Google Docs 到列表"}
               </button>
               {googleDocsConnection.connected ? (
                 <button className="import-disconnect-button" type="button" onClick={() => void disconnectGoogleDocs()}>断开连接</button>
@@ -903,6 +1653,19 @@ export function ContentImportDemo() {
               </div>
             </section>
           )}
+          {provider === "notion" && notionConnection.devLocalStorageAvailable ? (
+            <label className="import-dev-persistence">
+              <input
+                type="checkbox"
+                checked={notionDevPersistenceEnabled}
+                onChange={(event) => toggleNotionDevPersistence(event.target.checked)}
+              />
+              <span>
+                <strong>开发模式：在此浏览器保存 Notion 凭据</strong>
+                <small>{notionDevPersistenceMessage} 生产环境会强制禁用。</small>
+              </span>
+            </label>
+          ) : null}
           <button
             className="import-secondary-button"
             type="button"
@@ -914,7 +1677,9 @@ export function ContentImportDemo() {
           <p className="import-token-note">
             {liveReady
               ? provider === "notion" && notionConnection.connected
-                ? `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}。`
+                ? notionConnection.devLocalStorageAvailable && notionDevPersistenceEnabled
+                  ? `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}；开发凭据会同步到 localStorage。`
+                  : `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}。`
                 : provider === "feishu" && feishuConnection.connected
                   ? feishuConnection.mode === "local-demo"
                     ? "当前为本地模拟授权；配置商店应用凭据后会自动切换为真实飞书 OAuth。"
@@ -1041,7 +1806,7 @@ export function ContentImportDemo() {
 
 function notionMcpFeedback(outcome: string): { status: "ready" | "error"; message: string } {
   if (outcome === "connected") {
-    return { status: "ready", message: "Notion MCP 连接成功。点击“获取页面”，选择一篇后即可导入。" };
+    return { status: "ready", message: "Notion MCP 连接成功，正在自动获取最近修改的页面。" };
   }
   if (outcome === "denied") {
     return { status: "error", message: "你取消了 Notion MCP 授权，没有保存任何 Token。" };
@@ -1079,6 +1844,13 @@ function providerLabel(provider: Provider): string {
       : provider === "youmind"
         ? "YouMind"
         : "Google Docs";
+}
+
+function providerConnectionLabel(provider: Provider, settings: DemoSettings): string {
+  const connection = settings.connections[provider];
+  if (connection.connected) return connection.accountName || "已连接";
+  if (!connection.available) return "暂不可用";
+  return "待授权";
 }
 
 function formatNotionPageDate(timestamp?: string): string {

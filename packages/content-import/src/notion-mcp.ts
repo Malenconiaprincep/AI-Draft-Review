@@ -61,17 +61,28 @@ export function adaptNotionEnhancedMarkdown(value: string): {
       return "";
     })
     .replace(/<\/?meeting-notes\b[^>]*>/gi, "")
+    .replace(/<\/table>[ \t]*\n/gi, "</table>\n\n")
+    .replace(/<\/columns>[ \t]*\n/gi, "</columns>\n\n")
     .replace(/^([ \t]*(?:#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s+|[^\n]+?))\s+\{[^}\n]*(?:color|toggle)=["'][^"']+["'][^}\n]*\}\s*$/gmi, "$1")
     .replace(/^([ \t]*)- \[x\]\s+/gmi, "$1- ☑ ")
     .replace(/^([ \t]*)- \[ \]\s+/gm, "$1- ☐ ");
 
   let inFence = false;
+  let inColumns = false;
   markdown = markdown.split("\n").map((line) => {
     if (/^\s*```/.test(line)) {
       inFence = !inFence;
       return line;
     }
     if (inFence) return line;
+    if (/^\s*<columns\b/i.test(line)) inColumns = true;
+    if (inColumns) {
+      if (/^\s*<\/columns>/i.test(line)) inColumns = false;
+      return line;
+    }
+    if (/^\s*<empty-block\b[^>]*\/>\s*$/i.test(line)) {
+      return `\n${line.trim()}\n`;
+    }
 
     const imageCandidate = line.replace(/\\(!|\[|\]|\(|\))/g, "$1");
     const escapedImage = imageCandidate !== line && /^\s*!\[[^\]]*\]\(https?:\/\/\S+\)\s*$/i.test(imageCandidate);
@@ -86,8 +97,11 @@ export function adaptNotionEnhancedMarkdown(value: string): {
 
     if (/^\t+/.test(repaired)) {
       const indentation = repaired.match(/^\t+/)?.[0].length ?? 0;
-      repaired = `${"  ".repeat(indentation)}${repaired.slice(indentation)}`;
+      const remainder = repaired.slice(indentation);
+      const spacesPerLevel = /^(?:[-*+]|\d+\.)\s*/.test(remainder) ? 4 : 2;
+      repaired = `${" ".repeat(indentation * spacesPerLevel)}${remainder}`;
     }
+    repaired = repaired.replace(/^([ \t]*)-\s*$/, "$1- <!--tutti-empty-list-item-->");
     const explicitBlock = /^ {0,3}(?:#{1,4}\s+|(?:---|\*\*\*|___)\s*$|>\s+|!\[[^\]]*\]\(https?:\/\/\S+\)\s*$)/i.test(repaired);
     return escapedBlockStructure || escapedImage || explicitBlock ? `\n${repaired}\n` : repaired;
   }).join("\n");

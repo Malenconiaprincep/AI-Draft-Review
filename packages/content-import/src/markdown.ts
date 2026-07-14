@@ -63,8 +63,12 @@ function blockTokensToCanonical(tokens: MarkdownToken[], context: ParseContext):
         return [];
       case "paragraph":
         if (token.text) {
-          const media = mediaHtmlToCanonical(token.text.trim(), context);
+          const raw = token.text.trim();
+          const media = mediaHtmlToCanonical(raw, context);
           if (media) return media;
+          if (/^<(callout|details)\b[\s\S]*<\/\1>$/i.test(raw)) {
+            return htmlBlockToCanonical(raw, context);
+          }
         }
         return inlineNodesToBlocks(inlineTokens(token, context));
       case "text":
@@ -131,7 +135,9 @@ function listTokenToCanonical(token: MarkdownToken, context: ParseContext): Cano
 
 function tableTokenToCanonical(token: MarkdownToken, context: ParseContext): CanonicalNode {
   const header = token.header ?? [];
-  const rows = token.rows ?? [];
+  const rows = (token.rows ?? []).filter((row) => !isMarkdownTableDelimiterRow(
+    row.map((cell) => (cell.text ?? "").trim())
+  ));
   return {
     type: "table",
     content: [
@@ -151,6 +157,11 @@ function tableTokenToCanonical(token: MarkdownToken, context: ParseContext): Can
       }))
     ]
   };
+}
+
+function isMarkdownTableDelimiterRow(values: string[]): boolean {
+  const delimiters = values.map((value) => /^:?-{3,}:?$/.test(value));
+  return delimiters.some(Boolean) && values.every((value, index) => !value || delimiters[index]);
 }
 
 function inlineTokens(
@@ -274,7 +285,13 @@ function htmlBlockToCanonical(value: string, context: ParseContext): CanonicalNo
 
   if (/^<table\b/i.test(raw)) return [htmlTableToCanonical(raw, context)];
 
-  if (/^<(callout|details|columns|column|synced_block|meeting-notes)\b/i.test(raw)) {
+  if (/^<columns\b/i.test(raw)) return [htmlColumnsToCanonical(raw, context)];
+
+  if (/^<callout\b/i.test(raw)) return [htmlCalloutToCanonical(raw, context)];
+
+  if (/^<details\b/i.test(raw)) return [htmlDetailsToCanonical(raw, context)];
+
+  if (/^<(column|synced_block|meeting-notes)\b/i.test(raw)) {
     const inner = raw
       .replace(/^<[^>]+>/, "")
       .replace(/<\/[^>]+>$/, "")
@@ -285,9 +302,6 @@ function htmlBlockToCanonical(value: string, context: ParseContext): CanonicalNo
       breaks: context.adapter.breaks ?? false
     }) as unknown as MarkdownToken[];
     const content = blockTokensToCanonical(nested, context);
-    if (/^<(callout|details)\b/i.test(raw)) {
-      return [{ type: "blockquote", content }];
-    }
     return content;
   }
 
@@ -297,6 +311,78 @@ function htmlBlockToCanonical(value: string, context: ParseContext): CanonicalNo
     message: "平台扩展 Markdown/HTML 已降级为普通文本。"
   });
   return fallback ? [{ type: "paragraph", content: [{ type: "text", text: fallback }] }] : [];
+}
+
+function htmlCalloutToCanonical(raw: string, context: ParseContext): CanonicalNode {
+  const attributes = parseHtmlAttributes(raw.match(/^<callout\b([^>]*)>/i)?.[1] ?? "");
+  const inner = raw.replace(/^<callout\b[^>]*>/i, "").replace(/<\/callout>$/i, "");
+  const content = parseContainerBlocks(inner, context);
+  return {
+    type: "callout",
+    attrs: { icon: attributes.icon || "i" },
+    content: content.length ? content : [{ type: "paragraph" }]
+  };
+}
+
+function htmlDetailsToCanonical(raw: string, context: ParseContext): CanonicalNode {
+  const summary = raw.match(/<summary\b[^>]*>([\s\S]*?)<\/summary>/i)?.[1] ?? "Details";
+  const summaryTokens = marked.Lexer.lexInline(stripHtml(summary)) as unknown as MarkdownToken[];
+  const body = raw
+    .replace(/^<details\b[^>]*>/i, "")
+    .replace(/<summary\b[^>]*>[\s\S]*?<\/summary>/i, "")
+    .replace(/<\/details>$/i, "");
+  const content = parseContainerBlocks(body, context);
+  return {
+    type: "toggle",
+    attrs: { open: /<details\b[^>]*\bopen(?:\s|=|>)/i.test(raw) },
+    content: [
+      {
+        type: "toggleSummary",
+        content: summaryTokens.flatMap((token) => inlineTokenToCanonical(token, context))
+      },
+      ...(content.length ? content : [{ type: "paragraph" as const }])
+    ]
+  };
+}
+
+function parseContainerBlocks(value: string, context: ParseContext): CanonicalNode[] {
+  const tokens = marked.lexer(dedentContainer(value), {
+    gfm: true,
+    breaks: context.adapter.breaks ?? false
+  }) as unknown as MarkdownToken[];
+  return blockTokensToCanonical(tokens, context);
+}
+
+function htmlColumnsToCanonical(raw: string, context: ParseContext): CanonicalNode {
+  const columns = [...raw.matchAll(/<column\b[^>]*>([\s\S]*?)<\/column>/gi)].map((match) => {
+    const inner = dedentContainer(match[1]).replace(
+      /(<empty-block\b[^>]*\/>)[ \t]*\n/gi,
+      "$1\n\n"
+    );
+    const tokens = marked.lexer(inner, {
+      gfm: true,
+      breaks: context.adapter.breaks ?? false
+    }) as unknown as MarkdownToken[];
+    const content = blockTokensToCanonical(tokens, context);
+    return {
+      type: "column" as const,
+      content: content.length ? content : [{ type: "paragraph" as const }]
+    };
+  });
+  return {
+    type: "columns",
+    attrs: { count: Math.max(1, columns.length) },
+    content: columns.length ? columns : [{ type: "column", content: [{ type: "paragraph" }] }]
+  };
+}
+
+function dedentContainer(value: string): string {
+  const lines = value.replace(/^\n+|\n+$/g, "").split("\n");
+  const indents = lines
+    .filter((line) => line.trim())
+    .map((line) => line.match(/^[ \t]*/)?.[0].length ?? 0);
+  const indentation = indents.length ? Math.min(...indents) : 0;
+  return lines.map((line) => line.slice(Math.min(indentation, line.length))).join("\n");
 }
 
 function mediaHtmlToCanonical(
@@ -344,7 +430,12 @@ function mediaHtmlToCanonical(
 
 function htmlTableToCanonical(raw: string, context: ParseContext): CanonicalNode {
   const headerRow = /<table\b[^>]*header-row=["']true["']/i.test(raw);
-  const rowMatches = [...raw.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
+  const rowMatches = [...raw.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].filter((row) => {
+    const cells = [...row[1].matchAll(/<(td|th)\b[^>]*>([\s\S]*?)<\/\1>/gi)];
+    return !cells.length || !isMarkdownTableDelimiterRow(
+      cells.map((cell) => stripHtml(cell[2]).trim())
+    );
+  });
   return {
     type: "table",
     content: rowMatches.map((row, rowIndex) => {

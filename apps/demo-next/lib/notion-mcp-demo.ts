@@ -26,6 +26,15 @@ type NotionMcpSession = {
   accountId?: string;
 };
 
+export type NotionMcpDevSessionSnapshot = {
+  version: 1;
+  savedAt: string;
+  clientInformation?: OAuthClientInformationMixed;
+  tokens: OAuthTokens;
+  accountName?: string;
+  accountId?: string;
+};
+
 export type NotionMcpPageSummary = {
   id: string;
   title: string;
@@ -202,6 +211,42 @@ export function getNotionMcpConnection(request: Request) {
   };
 }
 
+export function isNotionDevLocalStorageAvailable() {
+  return process.env.NODE_ENV !== "production"
+    && (process.env.NOTION_DEV_LOCAL_STORAGE === "true" || process.env.NOTION_DEV_LOCAL_STORAGE === "1");
+}
+
+export function exportNotionMcpDevSession(request: Request): NotionMcpDevSessionSnapshot {
+  assertDevLocalStorageAvailable();
+  const session = requireConnectedSession(request);
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    clientInformation: session.clientInformation,
+    tokens: session.tokens as OAuthTokens,
+    accountName: session.accountName,
+    accountId: session.accountId
+  };
+}
+
+export function restoreNotionMcpDevSession(request: Request, value: unknown) {
+  assertDevLocalStorageAvailable();
+  const snapshot = parseDevSessionSnapshot(value);
+  const id = randomUUID();
+  const session: NotionMcpSession = {
+    id,
+    state: randomBytes(32).toString("hex"),
+    redirectUrl: new URL("/api/connectors/notion/callback", request.url).toString(),
+    expiresAt: Date.now() + SESSION_TTL_MS,
+    clientInformation: snapshot.clientInformation,
+    tokens: snapshot.tokens,
+    accountName: snapshot.accountName,
+    accountId: snapshot.accountId
+  };
+  sessions.set(id, session);
+  return { sessionId: id, accountName: session.accountName, accountId: session.accountId };
+}
+
 function createClient() {
   return new Client({ name: "tutti-content-import", version: "0.1.0" }, { capabilities: {} });
 }
@@ -254,6 +299,31 @@ function pruneExpiredSessions() {
   for (const [id, session] of sessions) {
     if (session.expiresAt <= now) sessions.delete(id);
   }
+}
+
+function assertDevLocalStorageAvailable() {
+  if (!isNotionDevLocalStorageAvailable()) {
+    throw new Error("dev_local_storage_disabled");
+  }
+}
+
+function parseDevSessionSnapshot(value: unknown): NotionMcpDevSessionSnapshot {
+  const record = asRecord(value);
+  const tokens = asRecord(record.tokens);
+  if (record.version !== 1 || typeof tokens.access_token !== "string" || !tokens.access_token.trim()) {
+    throw new Error("invalid_dev_session");
+  }
+  const clientInformation = asRecord(record.clientInformation);
+  return {
+    version: 1,
+    savedAt: typeof record.savedAt === "string" ? record.savedAt : new Date().toISOString(),
+    clientInformation: Object.keys(clientInformation).length
+      ? clientInformation as OAuthClientInformationMixed
+      : undefined,
+    tokens: tokens as OAuthTokens,
+    accountName: typeof record.accountName === "string" ? record.accountName : undefined,
+    accountId: typeof record.accountId === "string" ? record.accountId : undefined
+  };
 }
 
 function readCookie(request: Request, name: string): string | undefined {

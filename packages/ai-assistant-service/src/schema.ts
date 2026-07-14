@@ -7,6 +7,9 @@ export const supportedDraftNodeTypeSchema = z.enum([
   "heading",
   "blockquote",
   "codeBlock",
+  "callout",
+  "toggle",
+  "toggleSummary",
   "bulletList",
   "orderedList",
   "listItem",
@@ -17,7 +20,9 @@ export const supportedDraftNodeTypeSchema = z.enum([
   "table",
   "tableRow",
   "tableCell",
-  "tableHeader"
+  "tableHeader",
+  "columns",
+  "column"
 ]);
 
 export const supportedDraftMarkTypeSchema = z.enum(["bold", "italic", "strike", "code", "link"]);

@@ -21,6 +21,55 @@ test("accepts a structurally valid DraftDocJSON input", () => {
   assert.equal(draftReviewInputSchema.parse(baseInput).draft.docJson?.type, "doc");
 });
 
+test("accepts shared column layout nodes", () => {
+  const result = draftReviewInputSchema.safeParse({
+    ...baseInput,
+    draft: {
+      ...baseInput.draft,
+      docJson: {
+        type: "doc",
+        content: [{
+          type: "columns",
+          attrs: { count: 2 },
+          content: [
+            { type: "column", content: [{ type: "paragraph", content: [{ type: "text", text: "Left" }] }] },
+            { type: "column", content: [{ type: "paragraph", content: [{ type: "text", text: "Right" }] }] }
+          ]
+        }]
+      }
+    }
+  });
+  assert.equal(result.success, true);
+});
+
+test("accepts shared callout and toggle nodes", () => {
+  const result = draftReviewInputSchema.safeParse({
+    ...baseInput,
+    draft: {
+      ...baseInput.draft,
+      docJson: {
+        type: "doc",
+        content: [
+          {
+            type: "callout",
+            attrs: { icon: "i" },
+            content: [{ type: "paragraph", content: [{ type: "text", text: "Important" }] }]
+          },
+          {
+            type: "toggle",
+            attrs: { open: false },
+            content: [
+              { type: "toggleSummary", content: [{ type: "text", text: "Details" }] },
+              { type: "paragraph", content: [{ type: "text", text: "Hidden" }] }
+            ]
+          }
+        ]
+      }
+    }
+  });
+  assert.equal(result.success, true);
+});
+
 test("rejects a doc draft whose root is not a doc node", () => {
   const result = draftReviewInputSchema.safeParse({
     ...baseInput,

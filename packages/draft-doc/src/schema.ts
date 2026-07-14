@@ -61,6 +61,104 @@ export const Audio = Node.create({
   }
 });
 
+export const Columns = Node.create({
+  name: "columns",
+  group: "block",
+  content: "column+",
+  defining: true,
+
+  addAttributes() {
+    return { count: { default: 2 } };
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-type="columns"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-type": "columns" }), 0];
+  }
+});
+
+export const Column = Node.create({
+  name: "column",
+  content: "block+",
+  defining: true,
+
+  parseHTML() {
+    return [{ tag: 'div[data-type="column"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["div", mergeAttributes(HTMLAttributes, { "data-type": "column" }), 0];
+  }
+});
+
+export const Callout = Node.create({
+  name: "callout",
+  group: "block",
+  content: "block+",
+  defining: true,
+
+  addAttributes() {
+    return { icon: { default: "i" } };
+  },
+
+  parseHTML() {
+    return [{ tag: 'aside[data-type="callout"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["aside", mergeAttributes(HTMLAttributes, { "data-type": "callout" }), 0];
+  }
+});
+
+export const Toggle = Node.create({
+  name: "toggle",
+  group: "block",
+  content: "toggleSummary block+",
+  defining: true,
+
+  addAttributes() {
+    return {
+      open: {
+        default: false,
+        rendered: false,
+        parseHTML: (element) => element.hasAttribute("open")
+      }
+    };
+  },
+
+  parseHTML() {
+    return [{ tag: 'details[data-type="toggle"]' }];
+  },
+
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      "details",
+      mergeAttributes(HTMLAttributes, {
+        "data-type": "toggle",
+        ...(node.attrs.open ? { open: "" } : {})
+      }),
+      0
+    ];
+  }
+});
+
+export const ToggleSummary = Node.create({
+  name: "toggleSummary",
+  content: "inline*",
+  defining: true,
+
+  parseHTML() {
+    return [{ tag: 'summary[data-type="toggle-summary"]' }];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["summary", mergeAttributes(HTMLAttributes, { "data-type": "toggle-summary" }), 0];
+  }
+});
+
 export function createDraftDocExtensions() {
   return [
     StarterKit.configure({
@@ -74,6 +172,11 @@ export function createDraftDocExtensions() {
     }),
     Video,
     Audio,
+    Columns,
+    Column,
+    Callout,
+    Toggle,
+    ToggleSummary,
     Table.configure({
       resizable: false
     }),

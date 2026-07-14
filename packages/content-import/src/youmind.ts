@@ -1,4 +1,4 @@
-import { canonicalDocumentToDraftDoc, paragraph } from "./canonical.ts";
+import { canonicalDocumentToDraftDoc, canonicalNodeText, paragraph } from "./canonical.ts";
 import { ConnectorError, errorCodeForStatus, readErrorBody } from "./errors.ts";
 import { parseMarkdownToCanonical } from "./markdown.ts";
 import type {
@@ -160,6 +160,7 @@ export class YouMindConnector implements ContentConnector {
     const parsed = markdown
       ? parseMarkdownToCanonical(markdown, "youmind")
       : { content: extractCanonicalNodes(file), assets: [], warnings: [] };
+    const content = markdown ? adaptYouMindCanonicalNodes(parsed.content) : parsed.content;
     const title = readString(file, ["title", "name"]) ?? "Untitled YouMind file";
     const updatedAt = readString(file, ["updatedAt", "updated_at", "modifiedAt", "modified_at"]);
     const sourceUrl = readString(file, ["url", "shareUrl", "share_url"]);
@@ -169,7 +170,7 @@ export class YouMindConnector implements ContentConnector {
       title,
       revision: readString(file, ["revision", "version", "updatedAt", "updated_at"]),
       lastEditedAt: updatedAt,
-      content: parsed.content.length ? parsed.content : [paragraph("")],
+      content: content.length ? content : [paragraph("")],
       assets: parsed.assets,
       warnings: [
         ...parsed.warnings,
@@ -213,6 +214,53 @@ export class YouMindConnector implements ContentConnector {
     }
     return response.json().catch(() => undefined);
   }
+}
+
+function adaptYouMindCanonicalNodes(nodes: CanonicalNode[]): CanonicalNode[] {
+  const nested = nodes.map((node) => ({
+    ...node,
+    content: node.content ? adaptYouMindCanonicalNodes(node.content) : undefined
+  }));
+  const folded: CanonicalNode[] = [];
+
+  for (let index = 0; index < nested.length; index += 1) {
+    const node = nested[index];
+    if (canonicalNodeText(node).trim().toLowerCase() === "<aside>") {
+      const closingIndex = nested.findIndex(
+        (candidate, candidateIndex) => candidateIndex > index
+          && canonicalNodeText(candidate).trim().toLowerCase() === "</aside>"
+      );
+      if (closingIndex > index) {
+        const rawBody = nested.slice(index + 1, closingIndex);
+        const iconNode = rawBody.find((candidate) => /^<img\b[^>]*\/>$/i.test(canonicalNodeText(candidate).trim()));
+        const icon = canonicalNodeText(iconNode ?? { type: "text", text: "" }).match(/\balt=["']([^"']+)["']/i)?.[1] || "i";
+        const body = rawBody.filter((candidate) => !/^<img\b[^>]*\/>$/i.test(canonicalNodeText(candidate).trim()));
+        folded.push({
+          type: "callout",
+          attrs: { icon },
+          content: body.length ? body : [paragraph("")]
+        });
+        index = closingIndex;
+        continue;
+      }
+    }
+    folded.push(node);
+  }
+
+  return folded.map((node) => {
+    if (node.type !== "bulletList" || node.content?.length !== 1) return node;
+    const item = node.content[0];
+    const [summary, ...body] = item.type === "listItem" ? item.content ?? [] : [];
+    if (summary?.type !== "paragraph" || body.length === 0) return node;
+    return {
+      type: "toggle",
+      attrs: { open: false },
+      content: [
+        { type: "toggleSummary", content: summary.content ?? [] },
+        ...body
+      ]
+    };
+  });
 }
 
 export function createYouMindConnector(config: YouMindConnectorConfig = {}): YouMindConnector {
@@ -289,7 +337,7 @@ function toYouMindDocument(value: unknown) {
     provider: "youmind" as const,
     id,
     kind,
-    url: readString(nested, ["url", "shareUrl", "share_url"]),
+    url: readString(nested, ["url", "shareUrl", "share_url"]) ?? `https://youmind.com/crafts/${encodeURIComponent(id)}`,
     title: readString(nested, ["title", "name"]) ?? "Untitled YouMind file",
     lastEditedAt: readString(nested, ["updatedAt", "updated_at", "modifiedAt", "modified_at"])
   };

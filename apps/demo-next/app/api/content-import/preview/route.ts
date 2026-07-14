@@ -20,7 +20,8 @@ import {
 } from "../../../../lib/google-docs-demo";
 import {
   callNotionMcpFetch,
-  getNotionMcpConnection
+  getNotionMcpConnection,
+  isNotionDevLocalStorageAvailable
 } from "../../../../lib/notion-mcp-demo";
 import { localizeImportAssets } from "../../../../lib/local-import-assets";
 import { callFeishuMcpFetch } from "../../../../lib/feishu-mcp-demo";
@@ -64,7 +65,8 @@ export function GET(request: Request) {
         transport: "mcp",
         available: true,
         connected: notionMcp.connected,
-        accountName: notionMcp.accountName
+        accountName: notionMcp.accountName,
+        devLocalStorageAvailable: isNotionDevLocalStorageAvailable()
       },
       feishu: {
         transport: "mcp",
@@ -140,8 +142,9 @@ export async function POST(request: Request) {
       if (!getNotionMcpConnection(request).connected) {
         return errorResponse("请先点击 Connect Notion 完成 MCP 授权。", 401);
       }
+      const notionMcpResult = await callNotionMcpFetch(request, source);
       const result = await localizeImportAssets(
-        notionMcpFetchResultToImport(await callNotionMcpFetch(request, source), source)
+        notionMcpFetchResultToImport(notionMcpResult, source)
       );
       return importResponse(mode, result, "mcp");
     }

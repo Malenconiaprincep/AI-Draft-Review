@@ -104,6 +104,32 @@ test("preserves Notion soft line breaks as hard breaks", () => {
   assert.equal(paragraph?.content?.some((node) => node.type === "hardBreak"), true);
 });
 
+test("preserves fenced code language, indentation and blank lines", () => {
+  const code = [
+    "type User = { id: string; name: string }",
+    "",
+    "function greet(u: User) {",
+    "  // TODO: preserve language, indentation and blank lines",
+    "  console.log(`hello, ${u.name}`)",
+    "}",
+    "",
+    'greet({ id: "1", name: "Alice" })'
+  ].join("\n");
+  const result = notionMcpFetchResultToImport(
+    {
+      structuredContent: {
+        title: "Code blocks",
+        text: `<content>## Code\n\n\`\`\`typescript\n${code}\n\`\`\`</content>`
+      }
+    },
+    "b55c9c91384d452b81dbd1ef79372b75"
+  );
+
+  const codeBlock = result.doc.content?.find((node) => node.type === "codeBlock");
+  assert.equal(codeBlock?.attrs?.language, "typescript");
+  assert.equal(codeBlock?.content?.[0]?.text, code);
+});
+
 test("repairs Markdown structure escaped inside Notion text blocks", () => {
   const result = notionMcpFetchResultToImport(
     {
@@ -152,4 +178,73 @@ test("repairs HTML-escaped Notion quote markers", () => {
   );
 
   assert.equal(result.doc.content?.some((node) => node.type === "blockquote"), true);
+});
+
+test("keeps content after HTML tables and preserves Notion list indentation", () => {
+  const result = notionMcpFetchResultToImport(
+    {
+      structuredContent: {
+        title: "Nested content",
+        text: [
+          "<content>",
+          "<table>",
+          "<tr><td>Cell</td></tr>",
+          "</table>",
+          "<empty-block/>",
+          "- Goal",
+          "\t-",
+          "\t\t1. First action",
+          "\t-",
+          "\t\t1. Second action",
+          "Tail paragraph",
+          "</content>"
+        ].join("\n")
+      }
+    },
+    "04cd4992105f414b8680c2f1b03a0798"
+  );
+
+  const nodes = result.doc.content ?? [];
+  const tableIndex = nodes.findIndex((node) => node.type === "table");
+  const listIndex = nodes.findIndex((node) => node.type === "bulletList");
+  assert.equal(tableIndex >= 0, true);
+  assert.equal(listIndex > tableIndex, true);
+  assert.equal(JSON.stringify(nodes[listIndex]).includes('"type":"orderedList"'), true);
+  assert.equal(JSON.stringify(result.doc).includes("First action"), true);
+  assert.equal(JSON.stringify(result.doc).includes("Second action"), true);
+  assert.equal(JSON.stringify(result.doc).includes("Tail paragraph"), true);
+});
+
+test("preserves Notion columns and parses indented column images", () => {
+  const result = notionMcpFetchResultToImport(
+    {
+      structuredContent: {
+        title: "Column report",
+        text: [
+          "<content>",
+          "<columns>",
+          "\t<column>",
+          "\t\tLeft summary",
+          "\t\t![Left chart](https://files.example/left.png)",
+          "\t\t<empty-block/>",
+          "\t</column>",
+          "\t<column>",
+          "\t\tRight summary",
+          "\t\t![](https://files.example/right.png)",
+          "\t\t<empty-block/>",
+          "\t</column>",
+          "</columns>",
+          "</content>"
+        ].join("\n")
+      }
+    },
+    "27e30d7653af42228c3f016b0b78b1a3"
+  );
+
+  const columns = result.doc.content?.find((node) => node.type === "columns");
+  assert.equal(columns?.attrs?.count, 2);
+  assert.deepEqual(columns?.content?.map((node) => node.type), ["column", "column"]);
+  assert.equal(result.assets.length, 2);
+  assert.equal(JSON.stringify(columns).includes('"type":"image"'), true);
+  assert.equal(JSON.stringify(columns).includes("![]("), false);
 });

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { DraftNodeJSON } from "@tutti/draft-doc";
-import { resolveImportAssetDirectory, rewriteNodeAssetUrls } from "./local-import-assets.ts";
+import {
+  isTrustedPrivateDnsAssetHost,
+  resolveImportAssetDirectory,
+  rewriteNodeAssetUrls
+} from "./local-import-assets.ts";
 
 test("uses writable temporary storage on Vercel", () => {
   assert.equal(
@@ -45,4 +49,17 @@ test("rewrites imported media nodes and file links to local preview URLs", () =>
   );
   assert.equal(rewritten.content?.[0]?.attrs?.src, "/api/import-assets/a.png");
   assert.equal(rewritten.content?.[1]?.content?.[0]?.marks?.[0]?.attrs?.href, "/api/import-assets/a.png");
+});
+
+test("allows only Notion's known asset hosts through a private local DNS proxy", () => {
+  assert.equal(
+    isTrustedPrivateDnsAssetHost("notion", "prod-files-secure.s3.us-west-2.amazonaws.com"),
+    true
+  );
+  assert.equal(isTrustedPrivateDnsAssetHost("notion", "secure.notion-static.com"), true);
+  assert.equal(isTrustedPrivateDnsAssetHost("notion", "metadata.internal"), false);
+  assert.equal(
+    isTrustedPrivateDnsAssetHost("youmind", "prod-files-secure.s3.us-west-2.amazonaws.com"),
+    false
+  );
 });

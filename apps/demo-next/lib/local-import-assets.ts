@@ -89,7 +89,7 @@ async function downloadAsset(asset: ExternalAsset): Promise<string> {
   let response: Response | undefined;
 
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    await assertPublicHttpUrl(currentUrl);
+    await assertPublicHttpUrl(currentUrl, asset.provider);
     response = await fetch(currentUrl, {
       redirect: "manual",
       signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
@@ -126,7 +126,7 @@ async function downloadAsset(asset: ExternalAsset): Promise<string> {
   return `/api/import-assets/${filename}`;
 }
 
-async function assertPublicHttpUrl(url: URL): Promise<void> {
+async function assertPublicHttpUrl(url: URL, provider: ExternalAsset["provider"]): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("仅支持 HTTP/HTTPS 素材地址");
   }
@@ -135,9 +135,22 @@ async function assertPublicHttpUrl(url: URL): Promise<void> {
   const addresses = isIP(url.hostname)
     ? [{ address: url.hostname }]
     : await lookup(url.hostname, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
+  if (
+    addresses.length === 0
+    || (addresses.some(({ address }) => isPrivateAddress(address)) && !isTrustedPrivateDnsAssetHost(provider, url.hostname))
+  ) {
     throw new Error("素材地址指向了不可访问的内部网络");
   }
+}
+
+export function isTrustedPrivateDnsAssetHost(
+  provider: ExternalAsset["provider"],
+  hostname: string
+): boolean {
+  if (provider !== "notion") return false;
+  const normalized = hostname.toLowerCase();
+  return normalized === "secure.notion-static.com"
+    || /^prod-files-secure\.s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com$/.test(normalized);
 }
 
 function isPrivateAddress(address: string): boolean {

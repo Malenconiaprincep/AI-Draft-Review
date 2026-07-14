@@ -58,6 +58,50 @@ test("clamps imported heading levels to the Tutti schema", () => {
   assert.equal(result.doc.content?.[0]?.attrs?.level, 3);
 });
 
+test("drops duplicated Markdown table delimiter rows", () => {
+  const parsed = parseMarkdownToCanonical([
+    "| Name | Value | Notes |",
+    "| --- | --- | --- |",
+    "|  | ---: |  |",
+    "| Tutti | 1 | Ready |"
+  ].join("\n"), "youmind");
+
+  const table = parsed.content[0];
+  assert.equal(table?.type, "table");
+  assert.equal(table?.content?.length, 2);
+  assert.equal(JSON.stringify(table).includes('"text":"---"'), false);
+});
+
+test("drops delimiter rows after platform table normalization", () => {
+  const result = canonicalDocumentToDraftDoc({
+    ref: { provider: "notion", id: "page", kind: "page" },
+    title: "Table",
+    assets: [],
+    warnings: [],
+    content: [{
+      type: "table",
+      content: [
+        {
+          type: "tableRow",
+          content: [
+            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Name" }] }] },
+            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Value" }] }] }
+          ]
+        },
+        {
+          type: "tableRow",
+          content: [
+            { type: "tableCell", content: [{ type: "paragraph" }] },
+            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "---:" }] }] }
+          ]
+        }
+      ]
+    }]
+  });
+
+  assert.equal(result.doc.content?.[0]?.content?.length, 1);
+});
+
 test("supports Notion enhanced markdown media and HTML tables", () => {
   const parsed = parseMarkdownToCanonical(
     [
@@ -67,15 +111,29 @@ test("supports Notion enhanced markdown media and HTML tables", () => {
       "",
       '<file src="https://files.notion.example/brief.docx">Brief</file>',
       "",
-      '<table header-row="true"><tr><td>Name</td><td>Value</td></tr><tr><td>CTA</td><td>Join</td></tr></table>'
+      '<table header-row="true"><tr><td>Name</td><td>Value</td></tr><tr><td>---</td><td>---:</td></tr><tr><td>CTA</td><td>Join</td></tr></table>',
+      "",
+      '<callout icon="!">Important **message**</callout>',
+      "",
+      '<details><summary>More</summary>Hidden paragraph.</details>'
     ].join("\n"),
     "notion",
     notionMarkdownAdapter
   );
 
-  assert.deepEqual(parsed.content.map((node) => node.type), ["video", "audio", "paragraph", "table"]);
+  assert.deepEqual(parsed.content.map((node) => node.type), [
+    "video",
+    "audio",
+    "paragraph",
+    "table",
+    "callout",
+    "toggle"
+  ]);
   assert.deepEqual(parsed.assets.map((asset) => asset.kind), ["video", "audio", "file"]);
+  assert.equal(parsed.content[3].content?.length, 2);
   assert.equal(parsed.content[3].content?.[0]?.content?.[0]?.type, "tableHeader");
+  assert.equal(parsed.content[4].attrs?.icon, "!");
+  assert.equal(parsed.content[5].content?.[0]?.type, "toggleSummary");
 });
 
 test("keeps platform-specific inline repair out of the shared parser", () => {
