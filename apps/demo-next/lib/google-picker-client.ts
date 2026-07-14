@@ -82,16 +82,28 @@ type GoogleWindow = Window & typeof globalThis & {
 let dependenciesPromise: Promise<void> | undefined;
 let pickerLibraryPromise: Promise<void> | undefined;
 let cachedToken: { value: string; expiresAt: number; expiresIn: number } | undefined;
+let preparedOAuthClient: string | undefined;
 
-export async function openGoogleDocsPicker(config: GooglePickerConfig): Promise<GooglePickerResult> {
-  if (!config.available || !config.clientId || !config.apiKey || !config.appId || !config.scope) {
-    throw new Error("当前站点尚未启用 Google 文档连接。");
-  }
+export async function prepareGoogleDocsPicker(config: GooglePickerConfig): Promise<void> {
+  assertGooglePickerConfig(config);
   await loadGoogleDependencies();
   await loadPickerLibrary();
-  const token = await getAccessToken(config.clientId, config.scope);
-  const document = await showPicker(config, token.value);
-  return { accessToken: token.value, expiresIn: token.expiresIn, document };
+  preparedOAuthClient = oauthClientKey(config.clientId, config.scope);
+}
+
+export function openGoogleDocsPicker(config: GooglePickerConfig): Promise<GooglePickerResult> {
+  assertGooglePickerConfig(config);
+  if (preparedOAuthClient !== oauthClientKey(config.clientId, config.scope)) {
+    throw new Error("Google 授权组件仍在准备中，请稍后重试。");
+  }
+
+  // Keep this call synchronous with the user's click. GIS opens its popup inside
+  // requestAccessToken and browsers may block it after any preceding async work.
+  const tokenPromise = getAccessToken(config.clientId, config.scope);
+  return tokenPromise.then(async (token) => {
+    const document = await showPicker(config, token.value);
+    return { accessToken: token.value, expiresIn: token.expiresIn, document };
+  });
 }
 
 function loadGoogleDependencies(): Promise<void> {
@@ -99,7 +111,10 @@ function loadGoogleDependencies(): Promise<void> {
     dependenciesPromise = Promise.all([
       loadScript("google-api-loader", "https://apis.google.com/js/api.js", () => Boolean(googleWindow().gapi)),
       loadScript("google-identity-services", "https://accounts.google.com/gsi/client", () => Boolean(googleWindow().google?.accounts?.oauth2))
-    ]).then(() => undefined);
+    ]).then(() => undefined).catch((error) => {
+      dependenciesPromise = undefined;
+      throw error;
+    });
   }
   return dependenciesPromise;
 }
@@ -126,21 +141,24 @@ function loadScript(id: string, src: string, ready: () => boolean): Promise<void
 function loadPickerLibrary(): Promise<void> {
   if (googleWindow().google?.picker) return Promise.resolve();
   if (!pickerLibraryPromise) {
-    pickerLibraryPromise = new Promise((resolve, reject) => {
+    pickerLibraryPromise = new Promise<void>((resolve, reject) => {
       const gapi = googleWindow().gapi;
       if (!gapi) {
         reject(new Error("Google API loader 不可用。"));
         return;
       }
       gapi.load("picker", {
-        callback: resolve,
+        callback: () => resolve(),
         onerror: () => reject(new Error("Google Picker library 加载失败。")),
         timeout: 10_000,
         ontimeout: () => reject(new Error("Google Picker library 加载超时。"))
       });
+    }).catch((error) => {
+      pickerLibraryPromise = undefined;
+      throw error;
     });
   }
-  return pickerLibraryPromise;
+  return pickerLibraryPromise!;
 }
 
 async function getAccessToken(clientId: string, scope: string) {
@@ -151,7 +169,7 @@ async function getAccessToken(clientId: string, scope: string) {
     const tokenClient = oauth2.initTokenClient({ client_id: clientId, scope, callback: resolve });
     tokenClient.callback = (next) => {
       if (next.error || !next.access_token) {
-        reject(new Error(next.error_description || next.error || "Google 个人授权失败。"));
+        reject(new Error(googleTokenErrorMessage(next)));
         return;
       }
       resolve(next);
@@ -165,6 +183,31 @@ async function getAccessToken(clientId: string, scope: string) {
     expiresAt: Date.now() + expiresIn * 1000
   };
   return cachedToken;
+}
+
+function assertGooglePickerConfig(config: GooglePickerConfig): asserts config is GooglePickerConfig & {
+  clientId: string;
+  apiKey: string;
+  appId: string;
+  scope: string;
+} {
+  if (!config.available || !config.clientId || !config.apiKey || !config.appId || !config.scope) {
+    throw new Error("当前站点尚未启用 Google 文档连接。");
+  }
+}
+
+function oauthClientKey(clientId: string, scope: string): string {
+  return `${clientId}\n${scope}`;
+}
+
+function googleTokenErrorMessage(response: GoogleTokenResponse): string {
+  if (response.error === "popup_failed_to_open") {
+    return "Google 授权窗口被浏览器拦截，请允许当前站点打开弹窗后重试。";
+  }
+  if (response.error === "popup_closed") {
+    return "Google 授权窗口已关闭，请重新点击连接。";
+  }
+  return response.error_description || response.error || "Google 个人授权失败。";
 }
 
 function showPicker(config: GooglePickerConfig, accessToken: string): Promise<PickedGoogleDocument | undefined> {

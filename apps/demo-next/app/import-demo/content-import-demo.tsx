@@ -5,6 +5,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { useEffect, useMemo, useState } from "react";
 import {
   openGoogleDocsPicker,
+  prepareGoogleDocsPicker,
   type GooglePickerConfig,
   type PickedGoogleDocument
 } from "../../lib/google-picker-client";
@@ -157,6 +158,9 @@ export function ContentImportDemo() {
   const [youMindFilesStatus, setYouMindFilesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [youMindFilesMessage, setYouMindFilesMessage] = useState("连接后读取个人 Board 与文件列表。");
   const [googlePickerStatus, setGooglePickerStatus] = useState<"idle" | "loading">("idle");
+  const [googlePickerPreparation, setGooglePickerPreparation] = useState<"loading" | "ready" | "error">("loading");
+  const [googlePickerPreparationError, setGooglePickerPreparationError] = useState("");
+  const [googlePickerConfig, setGooglePickerConfig] = useState<GooglePickerConfig>();
   const [selectedGoogleDocument, setSelectedGoogleDocument] = useState<PickedGoogleDocument | undefined>();
 
   const editor = useEditor({
@@ -192,6 +196,34 @@ export function ContentImportDemo() {
       url.searchParams.delete("feishu_oauth");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setGooglePickerPreparation("loading");
+    setGooglePickerPreparationError("");
+    fetch("/api/connectors/google-docs/authorize", { cache: "no-store" })
+      .then(async (result) => {
+        const config = await result.json() as GooglePickerConfig & { error?: string };
+        if (!result.ok || !config.available) {
+          throw new Error(config.error || "当前站点尚未启用 Google 文档连接，请联系 Tutti 管理员。");
+        }
+        await prepareGoogleDocsPicker(config);
+        if (cancelled) return;
+        setGooglePickerConfig(config);
+        setGooglePickerPreparation("ready");
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setGooglePickerConfig(undefined);
+        setGooglePickerPreparation("error");
+        setGooglePickerPreparationError(
+          error instanceof Error ? error.message : "Google 授权组件加载失败。"
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -353,16 +385,16 @@ export function ContentImportDemo() {
   };
 
   const chooseGoogleDocument = async () => {
+    if (googlePickerPreparation !== "ready" || !googlePickerConfig) {
+      setStatus("error");
+      setMessage(googlePickerPreparationError || "Google 授权组件仍在准备中，请稍后重试。");
+      return;
+    }
     setGooglePickerStatus("loading");
     setStatus("loading");
     setMessage("正在打开 Google 个人授权与文档选择器…");
     try {
-      const configResult = await fetch("/api/connectors/google-docs/authorize", { cache: "no-store" });
-      const config = await configResult.json() as GooglePickerConfig & { error?: string };
-      if (!configResult.ok || !config.available) {
-        throw new Error(config.error || "当前站点尚未启用 Google 文档连接，请联系 Tutti 管理员。");
-      }
-      const pickerResult = await openGoogleDocsPicker(config);
+      const pickerResult = await openGoogleDocsPicker(googlePickerConfig);
       if (!pickerResult.document) {
         setStatus("idle");
         setMessage("已取消 Google Docs 选择，没有授予任何新文档权限。");
@@ -735,7 +767,11 @@ export function ContentImportDemo() {
                 <small>{selectedGoogleDocument ? "已选择" : "单篇授权"}</small>
               </div>
               <p className="import-picker-message">
-                点击连接后完成个人 Google 授权，再从官方窗口选择一篇 Docs；普通用户无需填写任何配置。
+                {googlePickerPreparation === "loading"
+                  ? "正在预加载 Google 授权组件，完成后即可连接。"
+                  : googlePickerPreparation === "error"
+                    ? googlePickerPreparationError
+                    : "点击连接后完成个人 Google 授权，再从官方窗口选择一篇 Docs；普通用户无需填写任何配置。"}
               </p>
               {selectedGoogleDocument ? (
                 <div className="import-page-list" role="list" aria-label="已选择的 Google Docs">
@@ -806,11 +842,15 @@ export function ContentImportDemo() {
               <button
                 className={`import-oauth-button ${googleDocsConnection.connected ? "connected" : ""}`}
                 type="button"
-                disabled={googlePickerStatus === "loading"}
+                disabled={googlePickerStatus === "loading" || googlePickerPreparation !== "ready"}
                 onClick={() => void chooseGoogleDocument()}
               >
                 <span className="provider-letter google">G</span>
-                {googlePickerStatus === "loading"
+                {googlePickerPreparation === "loading"
+                  ? "正在准备 Google 授权…"
+                  : googlePickerPreparation === "error"
+                    ? "Google 授权不可用"
+                    : googlePickerStatus === "loading"
                   ? "正在打开 Google Picker…"
                   : googleDocsConnection.connected
                     ? "重新选择 Google Docs"
