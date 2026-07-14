@@ -9,7 +9,15 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        {children}
+        <footer className="site-legal-footer">
+          <span>© 2026 Tutti</span>
+          <a href="/privacy">隐私政策</a>
+          <a href="/terms">服务条款</a>
+          <a href="mailto:makuta0919@gmail.com">联系我们</a>
+        </footer>
+      </body>
     </html>
   );
 }
