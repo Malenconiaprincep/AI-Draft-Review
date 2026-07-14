@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { DraftNodeJSON } from "@tutti/draft-doc";
-import { rewriteNodeAssetUrls } from "./local-import-assets.ts";
+import { resolveImportAssetDirectory, rewriteNodeAssetUrls } from "./local-import-assets.ts";
+
+test("uses writable temporary storage on Vercel", () => {
+  assert.equal(
+    resolveImportAssetDirectory({
+      cwd: "/var/task/apps/demo-next",
+      tempDirectory: "/tmp",
+      vercel: "1"
+    }),
+    "/tmp/tutti-import-assets"
+  );
+});
+
+test("keeps local assets under the project directory outside Vercel", () => {
+  assert.equal(
+    resolveImportAssetDirectory({
+      cwd: "/workspace/apps/demo-next",
+      tempDirectory: "/tmp",
+      vercel: ""
+    }),
+    "/workspace/apps/demo-next/.local/import-assets"
+  );
+});
 
 test("rewrites imported media nodes and file links to local preview URLs", () => {
   const assetId = "notion:url:https://files.example/image.png";

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ContentImportResult, ExternalAsset } from "@tutti/content-import";
 import type { DraftNodeJSON } from "@tutti/draft-doc";
@@ -10,7 +11,20 @@ const MAX_ASSET_BYTES = 80 * 1024 * 1024;
 const MAX_REDIRECTS = 4;
 const DOWNLOAD_TIMEOUT_MS = 20_000;
 
-export const LOCAL_IMPORT_ASSET_DIRECTORY = path.join(process.cwd(), ".local", "import-assets");
+export const LOCAL_IMPORT_ASSET_DIRECTORY = resolveImportAssetDirectory();
+
+export function resolveImportAssetDirectory(input: {
+  cwd?: string;
+  tempDirectory?: string;
+  vercel?: string;
+} = {}): string {
+  const cwd = input.cwd ?? process.cwd();
+  const tempDirectory = input.tempDirectory ?? tmpdir();
+  const vercel = input.vercel ?? process.env.VERCEL;
+  return vercel === "1"
+    ? path.join(tempDirectory, "tutti-import-assets")
+    : path.join(cwd, ".local", "import-assets");
+}
 
 type LocalAsset = ExternalAsset & { sourceUrl: string };
 
