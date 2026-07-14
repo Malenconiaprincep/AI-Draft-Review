@@ -21,7 +21,7 @@ import {
 import {
   callNotionMcpFetch,
   getNotionMcpConnection,
-  isNotionDevLocalStorageAvailable
+  isNotionBrowserSessionPersistenceAvailable
 } from "../../../../lib/notion-mcp-demo";
 import { localizeImportAssets } from "../../../../lib/local-import-assets";
 import { callFeishuMcpFetch } from "../../../../lib/feishu-mcp-demo";
@@ -66,7 +66,7 @@ export function GET(request: Request) {
         available: true,
         connected: notionMcp.connected,
         accountName: notionMcp.accountName,
-        devLocalStorageAvailable: isNotionDevLocalStorageAvailable()
+        browserSessionPersistenceAvailable: isNotionBrowserSessionPersistenceAvailable()
       },
       feishu: {
         transport: "mcp",

@@ -8,3 +8,5 @@ coverage
 *.tsbuildinfo
 .local/
 apps/demo-next/google-picker.config.local.json
+.vercel/
+.env.local

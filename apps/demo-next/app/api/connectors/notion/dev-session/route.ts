@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   exportNotionMcpDevSession,
-  isNotionDevLocalStorageAvailable,
+  isNotionBrowserSessionPersistenceAvailable,
   NOTION_MCP_SESSION_COOKIE,
   restoreNotionMcpDevSession
 } from "../../../../../lib/notion-mcp-demo";
@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export function GET(request: Request) {
-  if (!isNotionDevLocalStorageAvailable()) return disabledResponse();
+  if (!isNotionBrowserSessionPersistenceAvailable()) return disabledResponse();
   try {
     return NextResponse.json(exportNotionMcpDevSession(request), {
       headers: { "Cache-Control": "no-store" }
@@ -24,26 +24,29 @@ export function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!isNotionDevLocalStorageAvailable()) return disabledResponse();
+  if (!isNotionBrowserSessionPersistenceAvailable()) return disabledResponse();
   try {
     const restored = restoreNotionMcpDevSession(request, await request.json());
-    const response = NextResponse.json({ connected: true, accountName: restored.accountName });
+    const response = NextResponse.json(
+      { connected: true, accountName: restored.accountName },
+      { headers: { "Cache-Control": "no-store" } }
+    );
     response.cookies.set(NOTION_MCP_SESSION_COOKIE, restored.sessionId, {
       httpOnly: true,
       sameSite: "lax",
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       path: "/",
       maxAge: 12 * 60 * 60
     });
     return response;
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error && error.message === "invalid_dev_session" ? "本地 Notion 开发凭据无效。" : "无法恢复开发会话。" },
+      { error: error instanceof Error && error.message === "invalid_dev_session" ? "浏览器中的 Notion 会话无效。" : "无法恢复浏览器会话。" },
       { status: 400 }
     );
   }
 }
 
 function disabledResponse() {
-  return NextResponse.json({ error: "Notion localStorage 开发开关未开启。" }, { status: 404 });
+  return NextResponse.json({ error: "Notion 浏览器会话实验功能未开启。" }, { status: 404 });
 }

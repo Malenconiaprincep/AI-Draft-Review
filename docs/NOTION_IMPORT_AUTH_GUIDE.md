@@ -59,7 +59,7 @@ POST /api/content-import/preview
 - Token 不进入客户端 JavaScript、URL、日志或 Git。
 - Demo 会话最多保留 12 小时，服务重启后自动丢失。
 
-本地开发可以显式设置 `NOTION_DEV_LOCAL_STORAGE=true`。开启后，页面还会显示一个二次确认开关；勾选时才会把 MCP Token 与动态客户端信息写入当前浏览器 localStorage，并在本地服务重启后恢复服务端会话。生产构建会强制禁用这条路径。
+可以显式设置 `NOTION_BROWSER_SESSION_PERSISTENCE=true`，让页面显示一个默认关闭的实验开关；只有用户手动勾选后，才会把 MCP Token 与动态客户端信息写入当前浏览器 localStorage，并在刷新后尝试恢复服务端会话。该模式仅用于线上效果验证，Token 会暴露给当前源下运行的浏览器脚本，不能在公共或共享设备启用。本地开发仍可使用兼容开关 `NOTION_DEV_LOCAL_STORAGE=true`。
 
 生产环境必须改成服务端加密持久化，并关联 Tutti 用户、Notion 工作区、动态 MCP Client 和 Token 版本；还需要支持刷新 Token 原子轮换、断开连接、撤销和审计。
 

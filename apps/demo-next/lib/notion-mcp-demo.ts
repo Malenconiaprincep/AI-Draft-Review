@@ -7,6 +7,9 @@ import type {
   OAuthClientMetadata,
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { isNotionBrowserSessionPersistenceAvailable } from "./notion-browser-persistence";
+
+export { isNotionBrowserSessionPersistenceAvailable } from "./notion-browser-persistence";
 
 export const NOTION_MCP_SESSION_COOKIE = "tutti_notion_mcp_session";
 export const NOTION_MCP_SERVER_URL = process.env.NOTION_MCP_SERVER_URL || "https://mcp.notion.com/mcp";
@@ -211,13 +214,8 @@ export function getNotionMcpConnection(request: Request) {
   };
 }
 
-export function isNotionDevLocalStorageAvailable() {
-  return process.env.NODE_ENV !== "production"
-    && (process.env.NOTION_DEV_LOCAL_STORAGE === "true" || process.env.NOTION_DEV_LOCAL_STORAGE === "1");
-}
-
 export function exportNotionMcpDevSession(request: Request): NotionMcpDevSessionSnapshot {
-  assertDevLocalStorageAvailable();
+  assertBrowserSessionPersistenceAvailable();
   const session = requireConnectedSession(request);
   return {
     version: 1,
@@ -230,7 +228,7 @@ export function exportNotionMcpDevSession(request: Request): NotionMcpDevSession
 }
 
 export function restoreNotionMcpDevSession(request: Request, value: unknown) {
-  assertDevLocalStorageAvailable();
+  assertBrowserSessionPersistenceAvailable();
   const snapshot = parseDevSessionSnapshot(value);
   const id = randomUUID();
   const session: NotionMcpSession = {
@@ -301,9 +299,9 @@ function pruneExpiredSessions() {
   }
 }
 
-function assertDevLocalStorageAvailable() {
-  if (!isNotionDevLocalStorageAvailable()) {
-    throw new Error("dev_local_storage_disabled");
+function assertBrowserSessionPersistenceAvailable() {
+  if (!isNotionBrowserSessionPersistenceAvailable()) {
+    throw new Error("browser_session_persistence_disabled");
   }
 }
 

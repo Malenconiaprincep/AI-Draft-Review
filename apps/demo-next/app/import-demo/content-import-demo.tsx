@@ -21,7 +21,7 @@ type DemoSettings = {
       available: boolean;
       connected: boolean;
       accountName?: string;
-      devLocalStorageAvailable: boolean;
+      browserSessionPersistenceAvailable: boolean;
     };
     feishu: {
       transport: "mcp";
@@ -125,7 +125,7 @@ type WorkspaceDocument = {
 const DEFAULT_SETTINGS: DemoSettings = {
   liveAvailable: { notion: false, feishu: false, youmind: false, googledocs: false },
   connections: {
-    notion: { transport: "mcp", available: true, connected: false, devLocalStorageAvailable: false },
+    notion: { transport: "mcp", available: true, connected: false, browserSessionPersistenceAvailable: false },
     feishu: {
       transport: "mcp",
       available: false,
@@ -144,8 +144,8 @@ const DEFAULT_SETTINGS: DemoSettings = {
   }
 };
 
-const NOTION_DEV_PERSISTENCE_PREFERENCE = "tutti_notion_dev_persist_enabled";
-const NOTION_DEV_SESSION_STORAGE = "tutti_notion_dev_session";
+const NOTION_BROWSER_PERSISTENCE_PREFERENCE = "tutti_notion_browser_persist_enabled";
+const NOTION_BROWSER_SESSION_STORAGE = "tutti_notion_browser_session";
 
 export function ContentImportDemo() {
   const [provider, setProvider] = useState<Provider>("notion");
@@ -158,10 +158,10 @@ export function ContentImportDemo() {
   const [notionPages, setNotionPages] = useState<NotionPageSummary[]>([]);
   const [notionPagesStatus, setNotionPagesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [notionPagesMessage, setNotionPagesMessage] = useState("点击“获取页面”后才会请求 Notion MCP。");
-  const [notionDevPersistenceEnabled, setNotionDevPersistenceEnabled] = useState(false);
-  const [notionDevPersistenceHydrated, setNotionDevPersistenceHydrated] = useState(false);
-  const [notionDevPersistenceMessage, setNotionDevPersistenceMessage] = useState("开发凭据尚未写入此浏览器。");
-  const notionDevRestoreAttempted = useRef(false);
+  const [notionBrowserPersistenceEnabled, setNotionBrowserPersistenceEnabled] = useState(false);
+  const [notionBrowserPersistenceHydrated, setNotionBrowserPersistenceHydrated] = useState(false);
+  const [notionBrowserPersistenceMessage, setNotionBrowserPersistenceMessage] = useState("未在此浏览器保存 Notion 会话。");
+  const notionBrowserRestoreAttempted = useRef(false);
   const [feishuQuery, setFeishuQuery] = useState("最近修改的文档");
   const [feishuDocuments, setFeishuDocuments] = useState<FeishuDocumentSummary[]>([]);
   const [feishuDocumentsStatus, setFeishuDocumentsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -227,8 +227,10 @@ export function ContentImportDemo() {
   }, []);
 
   useEffect(() => {
-    setNotionDevPersistenceEnabled(window.localStorage.getItem(NOTION_DEV_PERSISTENCE_PREFERENCE) !== "0");
-    setNotionDevPersistenceHydrated(true);
+    setNotionBrowserPersistenceEnabled(
+      window.localStorage.getItem(NOTION_BROWSER_PERSISTENCE_PREFERENCE) === "1"
+    );
+    setNotionBrowserPersistenceHydrated(true);
   }, []);
 
   useEffect(() => {
@@ -273,9 +275,9 @@ export function ContentImportDemo() {
 
   useEffect(() => {
     if (
-      !notionDevPersistenceHydrated
-      || !settings.connections.notion.devLocalStorageAvailable
-      || !notionDevPersistenceEnabled
+      !notionBrowserPersistenceHydrated
+      || !settings.connections.notion.browserSessionPersistenceAvailable
+      || !notionBrowserPersistenceEnabled
     ) return;
 
     let cancelled = false;
@@ -284,43 +286,43 @@ export function ContentImportDemo() {
         const result = await fetch("/api/connectors/notion/dev-session", { cache: "no-store" });
         if (!result.ok) return;
         const snapshot = await result.json();
-        window.localStorage.setItem(NOTION_DEV_SESSION_STORAGE, JSON.stringify(snapshot));
-        if (!cancelled) setNotionDevPersistenceMessage("开发凭据已保存到此浏览器，刷新或重启服务后可恢复。");
+        window.localStorage.setItem(NOTION_BROWSER_SESSION_STORAGE, JSON.stringify(snapshot));
+        if (!cancelled) setNotionBrowserPersistenceMessage("Notion 会话已保存到此浏览器，刷新后会自动恢复。");
         return;
       }
 
-      if (notionDevRestoreAttempted.current) return;
-      const serialized = window.localStorage.getItem(NOTION_DEV_SESSION_STORAGE);
+      if (notionBrowserRestoreAttempted.current) return;
+      const serialized = window.localStorage.getItem(NOTION_BROWSER_SESSION_STORAGE);
       if (!serialized) return;
-      notionDevRestoreAttempted.current = true;
-      setNotionDevPersistenceMessage("正在从此浏览器恢复 Notion 开发凭据…");
+      notionBrowserRestoreAttempted.current = true;
+      setNotionBrowserPersistenceMessage("正在从此浏览器恢复 Notion 会话…");
       const result = await fetch("/api/connectors/notion/dev-session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: serialized
       });
       if (!result.ok) {
-        window.localStorage.removeItem(NOTION_DEV_SESSION_STORAGE);
-        if (!cancelled) setNotionDevPersistenceMessage("本地开发凭据已失效，请重新连接 Notion。");
+        window.localStorage.removeItem(NOTION_BROWSER_SESSION_STORAGE);
+        if (!cancelled) setNotionBrowserPersistenceMessage("浏览器中的 Notion 会话已失效，请重新绑定。");
         return;
       }
       const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
       if (!settingsResult.ok || cancelled) return;
       setSettings(await settingsResult.json() as DemoSettings);
-      setMessage("已从 localStorage 恢复 Notion 开发会话，正在自动获取页面。");
-      setNotionDevPersistenceMessage("开发凭据已从此浏览器恢复。");
+      setMessage("已从此浏览器恢复 Notion 会话，正在自动获取页面。");
+      setNotionBrowserPersistenceMessage("Notion 会话已从此浏览器恢复。");
     };
     void syncDevSession().catch(() => {
-      if (!cancelled) setNotionDevPersistenceMessage("同步本地开发凭据失败，请重新连接 Notion。");
+      if (!cancelled) setNotionBrowserPersistenceMessage("同步浏览器会话失败，请重新绑定 Notion。");
     });
     return () => {
       cancelled = true;
     };
   }, [
-    notionDevPersistenceEnabled,
-    notionDevPersistenceHydrated,
+    notionBrowserPersistenceEnabled,
+    notionBrowserPersistenceHydrated,
     settings.connections.notion.connected,
-    settings.connections.notion.devLocalStorageAvailable
+    settings.connections.notion.browserSessionPersistenceAvailable
   ]);
 
   useEffect(() => {
@@ -456,19 +458,19 @@ export function ContentImportDemo() {
     }
   }
 
-  const toggleNotionDevPersistence = (enabled: boolean) => {
-    setNotionDevPersistenceEnabled(enabled);
-    notionDevRestoreAttempted.current = false;
-    window.localStorage.setItem(NOTION_DEV_PERSISTENCE_PREFERENCE, enabled ? "1" : "0");
+  const toggleNotionBrowserPersistence = (enabled: boolean) => {
+    setNotionBrowserPersistenceEnabled(enabled);
+    notionBrowserRestoreAttempted.current = false;
+    window.localStorage.setItem(NOTION_BROWSER_PERSISTENCE_PREFERENCE, enabled ? "1" : "0");
     if (enabled) {
-      setNotionDevPersistenceMessage(
+      setNotionBrowserPersistenceMessage(
         settings.connections.notion.connected
-          ? "正在把当前 Notion 开发凭据保存到此浏览器…"
-          : "下次连接 Notion 后会把开发凭据保存到此浏览器。"
+          ? "正在把当前 Notion 会话保存到此浏览器…"
+          : "下次绑定 Notion 后会把会话保存到此浏览器。"
       );
     } else {
-      window.localStorage.removeItem(NOTION_DEV_SESSION_STORAGE);
-      setNotionDevPersistenceMessage("已关闭并清除此浏览器中的 Notion 开发凭据。");
+      window.localStorage.removeItem(NOTION_BROWSER_SESSION_STORAGE);
+      setNotionBrowserPersistenceMessage("已关闭并清除此浏览器中的 Notion 会话。");
     }
   };
 
@@ -1012,14 +1014,17 @@ export function ContentImportDemo() {
                 )}
               </div>
 
-              {provider === "notion" && notionConnection.devLocalStorageAvailable ? (
+              {provider === "notion" && notionConnection.browserSessionPersistenceAvailable ? (
                 <label className="import-dev-persistence compact">
                   <input
                     type="checkbox"
-                    checked={notionDevPersistenceEnabled}
-                    onChange={(event) => toggleNotionDevPersistence(event.target.checked)}
+                    checked={notionBrowserPersistenceEnabled}
+                    onChange={(event) => toggleNotionBrowserPersistence(event.target.checked)}
                   />
-                  <span><strong>在此浏览器保存开发凭据</strong><small>{notionDevPersistenceMessage}</small></span>
+                  <span>
+                    <strong>刷新后保持 Notion 绑定（实验）</strong>
+                    <small>{notionBrowserPersistenceMessage} Token 会保存在当前浏览器，请勿在公共设备开启。</small>
+                  </span>
                 </label>
               ) : null}
               </section>
@@ -1653,16 +1658,16 @@ export function ContentImportDemo() {
               </div>
             </section>
           )}
-          {provider === "notion" && notionConnection.devLocalStorageAvailable ? (
+          {provider === "notion" && notionConnection.browserSessionPersistenceAvailable ? (
             <label className="import-dev-persistence">
               <input
                 type="checkbox"
-                checked={notionDevPersistenceEnabled}
-                onChange={(event) => toggleNotionDevPersistence(event.target.checked)}
+                checked={notionBrowserPersistenceEnabled}
+                onChange={(event) => toggleNotionBrowserPersistence(event.target.checked)}
               />
               <span>
-                <strong>开发模式：在此浏览器保存 Notion 凭据</strong>
-                <small>{notionDevPersistenceMessage} 生产环境会强制禁用。</small>
+                <strong>刷新后保持 Notion 绑定（实验）</strong>
+                <small>{notionBrowserPersistenceMessage} Token 会写入当前浏览器 localStorage，请勿在公共设备开启。</small>
               </span>
             </label>
           ) : null}
@@ -1677,8 +1682,8 @@ export function ContentImportDemo() {
           <p className="import-token-note">
             {liveReady
               ? provider === "notion" && notionConnection.connected
-                ? notionConnection.devLocalStorageAvailable && notionDevPersistenceEnabled
-                  ? `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}；开发凭据会同步到 localStorage。`
+                ? notionConnection.browserSessionPersistenceAvailable && notionBrowserPersistenceEnabled
+                  ? `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}；当前浏览器会保存会话以便刷新恢复。`
                   : `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}。`
                 : provider === "feishu" && feishuConnection.connected
                   ? feishuConnection.mode === "local-demo"
