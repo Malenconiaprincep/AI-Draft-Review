@@ -1,6 +1,7 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import TextAlign from "@tiptap/extension-text-align";
 import StarterKit from "@tiptap/starter-kit";
 
 export const DRAFT_DOC_TIPTAP_VERSION = "3.27.1";
@@ -165,6 +166,9 @@ export function createDraftDocExtensions() {
       heading: {
         levels: [1, 2, 3]
       }
+    }),
+    TextAlign.configure({
+      types: ["heading", "paragraph"]
     }),
     Image.configure({
       inline: false,

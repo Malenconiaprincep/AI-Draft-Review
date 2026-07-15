@@ -1,400 +1,373 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ConnectorError,
-  createFeishuConnector,
-  type ConnectorToken,
-  type FeishuConnectorConfig
+  canonicalDocumentToDraftDoc,
+  parseMarkdownToCanonical,
+  type ContentImportResult,
+  type FetchLike
 } from "@tutti/content-import";
-import { registerTuttiFeishuApp } from "./feishu-register-app";
 
-export const FEISHU_SESSION_COOKIE = "tutti_feishu_session";
-export const FEISHU_LOCAL_DEMO_ACCOUNT = "本地飞书演示账号";
+const MAX_PUBLIC_PAGE_BYTES = 4 * 1024 * 1024;
+const MIN_PUBLIC_CONTENT_LENGTH = 20;
+const MAX_PUBLIC_REDIRECTS = 12;
+const PUBLIC_FETCH_TIMEOUT_MS = 20_000;
+const FEISHU_PUBLIC_DOMAINS = ["feishu.cn", "larksuite.com", "larkoffice.com"];
 
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const REFRESH_EARLY_MS = 60 * 1000;
-const REGISTRATION_READY_TIMEOUT_MS = 20 * 1000;
-
-type FeishuAppCredentials = {
-  clientId: string;
-  clientSecret: string;
-  tenantBrand?: "feishu" | "lark";
-};
-
-type FeishuRegistration = {
-  status: "starting" | "awaiting_user" | "registered" | "failed";
-  authorizationUrl?: string;
-  expiresAt?: number;
-  error?: string;
-  abortController: AbortController;
-};
-
-type FeishuSession = {
-  id: string;
-  state?: string;
-  redirectUri: string;
-  expiresAt: number;
-  token?: ConnectorToken;
-  appCredentials?: FeishuAppCredentials;
-  registration?: FeishuRegistration;
-  refreshPromise?: Promise<ConnectorToken>;
-};
-
-const globalStore = globalThis as typeof globalThis & {
-  __tuttiFeishuSessions?: Map<string, FeishuSession>;
-};
-
-const sessions = globalStore.__tuttiFeishuSessions ?? new Map<string, FeishuSession>();
-globalStore.__tuttiFeishuSessions = sessions;
-
-export function beginFeishuAuthorization(request: Request) {
-  pruneExpiredSessions();
-  const redirectUri = getFeishuRedirectUri(request);
-  const state = randomBytes(32).toString("hex");
-  const session = isFeishuDynamicAppEnabled()
-    ? requireRegisteredAppSession(request)
-    : createFeishuSession(redirectUri);
-  session.state = state;
-  session.redirectUri = redirectUri;
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
-  if (isFeishuLocalDemoEnabled()) {
-    const callbackUrl = new URL(redirectUri);
-    callbackUrl.searchParams.set("code", "local-demo");
-    callbackUrl.searchParams.set("state", state);
-    return {
-      sessionId: session.id,
-      authorizationUrl: callbackUrl.toString()
-    };
-  }
-  const connector = createFeishuConnector(requireFeishuConfig(redirectUri, session));
+export function getFeishuConnection() {
   return {
-    sessionId: session.id,
-    authorizationUrl: connector.getAuthorizationUrl(state)
+    available: false,
+    connected: false,
+    mode: "public-only" as const,
+    appType: "custom" as const
   };
 }
 
-export async function finishFeishuAuthorization(request: Request) {
-  const session = requireSession(request);
-  const url = new URL(request.url);
-  const code = url.searchParams.get("code");
-  validateState(session, url.searchParams.get("state"));
-  session.state = undefined;
-  if (!code) throw new Error("missing_code");
-
-  if (code === "local-demo" && isFeishuLocalDemoEnabled()) {
-    session.token = {
-      accessToken: "local-feishu-demo-token",
-      tokenType: "bearer",
-      accountId: "local-feishu-demo-user",
-      accountName: FEISHU_LOCAL_DEMO_ACCOUNT,
-      metadata: { localDemo: true, appType: "store" }
-    };
-    session.expiresAt = Date.now() + SESSION_TTL_MS;
-    return session.token;
-  }
-
-  const connector = createFeishuConnector(requireFeishuConfig(session.redirectUri, session));
-  session.token = await connector.exchangeAuthorization(code);
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
-  return session.token;
-}
-
-export function validateFeishuAuthorizationState(request: Request) {
-  const session = requireSession(request);
-  const state = new URL(request.url).searchParams.get("state");
-  validateState(session, state);
-  session.state = undefined;
-}
-
-export function getFeishuConnection(request: Request) {
-  const session = getSession(request);
-  const localDemo = isFeishuLocalDemoEnabled();
-  const dynamicApp = isFeishuDynamicAppEnabled();
-  return {
-    available: isFeishuConfigured() || localDemo || dynamicApp,
-    connected: Boolean(session?.token?.accessToken),
-    accountName: session?.token?.accountName || (session?.token ? "飞书账号" : undefined),
-    mode: localDemo
-      ? "local-demo" as const
-      : dynamicApp
-        ? "dynamic-app" as const
-        : "oauth" as const,
-    appType: dynamicApp ? "custom" as const : "store" as const
-  };
-}
-
-export async function startFeishuAppRegistration(request: Request) {
-  if (!isFeishuDynamicAppEnabled()) {
-    throw new Error("dynamic_registration_unavailable");
-  }
-  pruneExpiredSessions();
-  const redirectUri = getFeishuRedirectUri(request);
-  const existingSession = getSession(request);
-  const session = existingSession ?? createFeishuSession(redirectUri);
-  session.redirectUri = redirectUri;
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
-
-  if (session.appCredentials) {
-    return { sessionId: session.id, ...registrationView(session) };
-  }
-  if (
-    session.registration?.status === "awaiting_user"
-    && session.registration.authorizationUrl
-    && (session.registration.expiresAt ?? 0) > Date.now()
-  ) {
-    return { sessionId: session.id, ...registrationView(session) };
-  }
-
-  session.registration?.abortController.abort();
-  const abortController = new AbortController();
-  session.registration = { status: "starting", abortController };
-
-  let resolveReady: (() => void) | undefined;
-  let rejectReady: ((reason: unknown) => void) | undefined;
-  const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-
-  void registerTuttiFeishuApp({
-    signal: abortController.signal,
-    onAuthorizationUrl(info) {
-      if (session.registration?.abortController !== abortController) return;
-      session.registration.status = "awaiting_user";
-      session.registration.authorizationUrl = info.url;
-      session.registration.expiresAt = Date.now() + info.expireIn * 1000;
-      resolveReady?.();
-    }
-  }).then((result) => {
-    if (session.registration?.abortController !== abortController) return;
-    session.appCredentials = {
-      clientId: result.clientId,
-      clientSecret: result.clientSecret,
-      tenantBrand: result.tenantBrand
-    };
-    session.registration.status = "registered";
-    session.registration.authorizationUrl = undefined;
-    session.registration.expiresAt = undefined;
-    session.expiresAt = Date.now() + SESSION_TTL_MS;
-  }).catch((error: unknown) => {
-    if (session.registration?.abortController !== abortController) return;
-    const detail = registrationErrorMessage(error);
-    session.registration.status = "failed";
-    session.registration.error = detail;
-    rejectReady?.(new Error(detail));
-  });
-
-  await Promise.race([
-    ready,
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("生成飞书授权链接超时，请重试。")), REGISTRATION_READY_TIMEOUT_MS);
-    })
-  ]);
-  return { sessionId: session.id, ...registrationView(session) };
-}
-
-export function getFeishuAppRegistration(request: Request) {
-  const session = getSession(request);
-  return session ? registrationView(session) : { status: "idle" as const };
-}
-
-export function isFeishuLocalDemoToken(token: ConnectorToken): boolean {
-  return token.metadata?.localDemo === true;
-}
-
-export async function getFeishuToken(request: Request): Promise<ConnectorToken> {
-  const session = requireSession(request);
-  if (!session.token?.accessToken) {
-    throw new ConnectorError({
-      provider: "feishu",
-      code: "authorization_failed",
-      message: "请先点击 Connect 飞书完成 OAuth 授权。",
-      status: 401
-    });
-  }
-
-  if (!tokenNeedsRefresh(session.token)) return session.token;
-  if (!session.refreshPromise) {
-    const currentToken = session.token;
-    session.refreshPromise = (async () => {
-      const connector = createFeishuConnector(requireFeishuConfig(session.redirectUri, session));
-      const refreshed = await connector.refreshAuthorization(currentToken);
-      session.token = refreshed;
-      session.expiresAt = Date.now() + SESSION_TTL_MS;
-      return refreshed;
-    })();
-  }
-  const refreshPromise = session.refreshPromise;
+/**
+ * Best-effort anonymous import for Feishu/Lark public share pages.
+ *
+ * This deliberately does not use OpenAPI, an app identity or an end-user
+ * session. Feishu's public guest flow sets short-lived cookies while redirecting
+ * through its account pages, so those cookies are kept only for this request.
+ */
+export async function importPublicFeishuDocument(
+  _request: Request,
+  source: string,
+  fetchImpl: FetchLike = fetch
+): Promise<ContentImportResult> {
+  const ref = resolvePublicFeishuSource(source);
+  let response: Response;
   try {
-    return await refreshPromise;
-  } finally {
-    if (session.refreshPromise === refreshPromise) session.refreshPromise = undefined;
-  }
-}
-
-export function getFeishuApiConfig(): Pick<
-  FeishuConnectorConfig,
-  "apiBaseUrl" | "accountsBaseUrl"
-> {
-  return {
-    apiBaseUrl: process.env.FEISHU_API_BASE_URL,
-    accountsBaseUrl: process.env.FEISHU_ACCOUNTS_BASE_URL
-  };
-}
-
-function requireFeishuConfig(
-  redirectUri: string,
-  session?: FeishuSession
-): FeishuConnectorConfig {
-  const clientId = session?.appCredentials?.clientId ?? process.env.FEISHU_APP_ID;
-  const clientSecret = session?.appCredentials?.clientSecret ?? process.env.FEISHU_APP_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error("missing_feishu_config");
-  }
-  const dynamicBrand = session?.appCredentials?.tenantBrand;
-  const brandApiBaseUrl = dynamicBrand === "lark" ? "https://open.larksuite.com" : undefined;
-  const brandAccountsBaseUrl = dynamicBrand === "lark" ? "https://accounts.larksuite.com" : undefined;
-  return {
-    clientId,
-    clientSecret,
-    redirectUri,
-    ...getFeishuApiConfig(),
-    apiBaseUrl: process.env.FEISHU_API_BASE_URL ?? brandApiBaseUrl,
-    accountsBaseUrl: process.env.FEISHU_ACCOUNTS_BASE_URL ?? brandAccountsBaseUrl
-  };
-}
-
-function isFeishuConfigured(): boolean {
-  return Boolean(process.env.FEISHU_APP_ID && process.env.FEISHU_APP_SECRET);
-}
-
-function isFeishuLocalDemoEnabled(): boolean {
-  if (isFeishuConfigured()) return false;
-  if (process.env.FEISHU_APP_ID || process.env.FEISHU_APP_SECRET) return false;
-  return process.env.FEISHU_LOCAL_DEMO === "true" || process.env.FEISHU_LOCAL_DEMO === "1";
-}
-
-function isFeishuDynamicAppEnabled(): boolean {
-  if (isFeishuConfigured() || isFeishuLocalDemoEnabled()) return false;
-  if (process.env.FEISHU_APP_ID || process.env.FEISHU_APP_SECRET) return false;
-  if (process.env.FEISHU_DYNAMIC_APP === "false" || process.env.FEISHU_DYNAMIC_APP === "0") {
-    return false;
-  }
-  return process.env.NODE_ENV !== "production" || process.env.FEISHU_DYNAMIC_APP === "true";
-}
-
-function getFeishuRedirectUri(request: Request): string {
-  return process.env.FEISHU_REDIRECT_URI
-    || new URL("/api/connectors/feishu/callback", request.url).toString();
-}
-
-function tokenNeedsRefresh(token: ConnectorToken): boolean {
-  if (!token.expiresAt) return false;
-  const expiresAt = Date.parse(token.expiresAt);
-  return Number.isFinite(expiresAt) && expiresAt <= Date.now() + REFRESH_EARLY_MS;
-}
-
-function getSession(request: Request): FeishuSession | undefined {
-  pruneExpiredSessions();
-  const id = readCookie(request, FEISHU_SESSION_COOKIE);
-  return id ? sessions.get(id) : undefined;
-}
-
-function createFeishuSession(redirectUri: string): FeishuSession {
-  const session: FeishuSession = {
-    id: randomUUID(),
-    redirectUri,
-    expiresAt: Date.now() + SESSION_TTL_MS
-  };
-  sessions.set(session.id, session);
-  return session;
-}
-
-function requireRegisteredAppSession(request: Request): FeishuSession {
-  const session = requireSession(request);
-  if (!session.appCredentials) {
+    response = await fetchPublicFeishuPage(ref.url!, fetchImpl);
+  } catch (error) {
+    if (error instanceof ConnectorError) throw error;
     throw new ConnectorError({
       provider: "feishu",
-      code: "authorization_failed",
-      message: "请先打开飞书动态链接并确认创建应用。",
-      status: 409
+      code: "provider_error",
+      message: "匿名访问飞书公开链接失败，请稍后重试。",
+      status: 502,
+      retryable: true,
+      details: error instanceof Error ? error.message : error
     });
   }
-  return session;
-}
 
-function requireSession(request: Request): FeishuSession {
-  const session = getSession(request);
-  if (!session) {
+  const finalUrl = safeUrl(response.url || ref.url!);
+  if (isFeishuLoginUrl(finalUrl)) {
+    throw anonymousPreviewUnavailable(
+      "飞书把这个链接跳转到了登录页，未向匿名访客返回文档内容。请确认分享范围是“互联网获得链接的人可阅读”，且没有开启密码。"
+    );
+  }
+  if (!response.ok) {
     throw new ConnectorError({
       provider: "feishu",
-      code: "authorization_failed",
-      message: "飞书授权会话不存在或已过期，请重新连接。",
-      status: 401
+      code: response.status === 404 ? "not_found" : response.status === 401 || response.status === 403 ? "access_denied" : "provider_error",
+      message: response.status === 404
+        ? "飞书公开链接不存在或已失效。"
+        : "飞书没有向匿名访客开放这篇文档，暂时无法生成预览。",
+      status: response.status,
+      retryable: response.status >= 500
     });
   }
-  return session;
+
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType && !contentType.includes("text/html") && !contentType.includes("text/plain")) {
+    throw anonymousPreviewUnavailable("飞书公开链接没有返回可解析的网页内容，暂时无法生成预览。");
+  }
+
+  const html = await readResponseText(response, MAX_PUBLIC_PAGE_BYTES);
+  const extracted = extractPublicFeishuPage(html);
+  if (!extracted || extracted.markdown.replace(/[#*_`>\-\s]/g, "").length < MIN_PUBLIC_CONTENT_LENGTH) {
+    throw anonymousPreviewUnavailable(
+      "飞书公开页没有提供可匿名解析的正文，可能需要登录、访问密码，或当前页面结构暂不支持预览。"
+    );
+  }
+
+  const parsed = parseMarkdownToCanonical(extracted.markdown, "feishu", { breaks: true });
+  return canonicalDocumentToDraftDoc({
+    ref,
+    title: extracted.title || "飞书公开文档",
+    content: parsed.content,
+    assets: parsed.assets,
+    warnings: [
+      ...parsed.warnings,
+      {
+        code: "format_downgraded",
+        message: "此预览来自匿名公开网页，复杂排版、评论和部分嵌入内容可能被降级。"
+      }
+    ]
+  });
 }
 
-function pruneExpiredSessions() {
-  const now = Date.now();
-  for (const [id, session] of sessions) {
-    if (session.expiresAt <= now) {
-      session.registration?.abortController.abort();
-      sessions.delete(id);
-    }
+function resolvePublicFeishuSource(source: string) {
+  const url = safeUrl(source.trim());
+  const hostname = url?.hostname.toLowerCase();
+  const allowedHost = hostname && isAllowedFeishuHost(hostname);
+  const match = url?.pathname.match(/^\/(docx|wiki)\/([A-Za-z0-9_-]{8,128})\/?$/i);
+  if (!url || url.protocol !== "https:" || !allowedHost || !match) {
+    throw new ConnectorError({
+      provider: "feishu",
+      code: "invalid_source",
+      message: "请输入完整的飞书 Docx 或 Wiki HTTPS 公开链接。",
+      status: 400
+    });
   }
-}
-
-function registrationView(session: FeishuSession) {
-  if (session.appCredentials) {
-    return {
-      status: "registered" as const,
-      continueUrl: "/api/connectors/feishu/authorize"
-    };
-  }
-  if (!session.registration) return { status: "idle" as const };
   return {
-    status: session.registration.status,
-    authorizationUrl: session.registration.authorizationUrl,
-    expiresAt: session.registration.expiresAt
-      ? new Date(session.registration.expiresAt).toISOString()
-      : undefined,
-    error: session.registration.error
+    provider: "feishu" as const,
+    id: match[2],
+    kind: match[1].toLowerCase(),
+    url: url.toString()
   };
 }
 
-function registrationErrorMessage(error: unknown): string {
-  if (error && typeof error === "object") {
-    const value = error as { code?: unknown; description?: unknown; message?: unknown };
-    if (value.code === "access_denied") return "你取消了飞书应用创建。";
-    if (value.code === "expired_token") return "飞书动态链接已过期，请重新生成。";
-    if (typeof value.description === "string" && value.description) return value.description;
-    if (typeof value.message === "string" && value.message) return value.message;
-  }
-  return "创建飞书应用失败，请重试。";
-}
+async function fetchPublicFeishuPage(source: string, fetchImpl: FetchLike): Promise<Response> {
+  const cookies = new Map<string, string>();
+  const signal = AbortSignal.timeout(PUBLIC_FETCH_TIMEOUT_MS);
+  let currentUrl = new URL(source);
 
-function readCookie(request: Request, name: string): string | undefined {
-  const cookieHeader = request.headers.get("cookie");
-  if (!cookieHeader) return undefined;
-  for (const part of cookieHeader.split(";")) {
-    const separator = part.indexOf("=");
-    if (separator < 0) continue;
-    if (part.slice(0, separator).trim() === name) {
-      return decodeURIComponent(part.slice(separator + 1).trim());
+  for (let redirectCount = 0; redirectCount <= MAX_PUBLIC_REDIRECTS; redirectCount += 1) {
+    const headers = new Headers({
+      Accept: "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+      "User-Agent": "Mozilla/5.0 (compatible; TuttiPublicDocumentPreview/1.0)"
+    });
+    if (cookies.size) headers.set("Cookie", [...cookies.values()].join("; "));
+
+    const response = await fetchImpl(currentUrl.toString(), {
+      redirect: "manual",
+      signal,
+      headers
+    });
+    rememberResponseCookies(response.headers, cookies);
+
+    if (!isRedirectStatus(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) return response;
+    const nextUrl = safeUrl(location, currentUrl);
+    if (!nextUrl || nextUrl.protocol !== "https:" || !isAllowedFeishuHost(nextUrl.hostname)) {
+      await response.body?.cancel();
+      throw anonymousPreviewUnavailable("飞书公开链接跳转到了不受信任的地址，已停止预览。");
     }
+
+    await response.body?.cancel();
+    currentUrl = nextUrl;
   }
-  return undefined;
+
+  throw anonymousPreviewUnavailable("飞书公开链接重定向次数过多，暂时无法生成预览。");
 }
 
-function safeEqual(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+function rememberResponseCookies(headers: Headers, cookies: Map<string, string>) {
+  const extendedHeaders = headers as Headers & { getSetCookie?: () => string[] };
+  const setCookieValues = typeof extendedHeaders.getSetCookie === "function"
+    ? extendedHeaders.getSetCookie()
+    : splitCombinedSetCookie(headers.get("set-cookie"));
+
+  for (const setCookie of setCookieValues) {
+    const nameValue = setCookie.split(";", 1)[0]?.trim();
+    const separator = nameValue?.indexOf("=") ?? -1;
+    if (!nameValue || separator <= 0) continue;
+    const name = nameValue.slice(0, separator);
+    if (/;\s*max-age=0(?:;|$)/i.test(setCookie)) cookies.delete(name);
+    else cookies.set(name, nameValue);
+  }
 }
 
-function validateState(session: FeishuSession, state: string | null) {
-  if (!state || !session.state || !safeEqual(state, session.state)) {
-    throw new Error("invalid_state");
+function splitCombinedSetCookie(value: string | null): string[] {
+  return value ? value.split(/,(?=\s*[^;,=\s]+=[^;,]*)/) : [];
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function isAllowedFeishuHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return FEISHU_PUBLIC_DOMAINS.some(
+    (domain) => normalized === domain || normalized.endsWith(`.${domain}`)
+  );
+}
+
+function isFeishuLoginUrl(url: URL | undefined): boolean {
+  if (!url) return false;
+  const hostname = url.hostname.toLowerCase();
+  return hostname === "accounts.feishu.cn"
+    || hostname === "login.feishu.cn"
+    || hostname === "accounts.larksuite.com"
+    || /\/accounts\/(?:page\/login|trap)|\/login(?:\/|$)/i.test(url.pathname);
+}
+
+function extractPublicFeishuPage(html: string): { title: string; markdown: string } | undefined {
+  const normalized = html.replace(/\r\n?/g, "\n");
+  const title = firstDecodedHtmlValue([
+    metaContent(normalized, "property", "og:title"),
+    metaContent(normalized, "name", "twitter:title"),
+    tagContent(normalized, "h1"),
+    tagContent(normalized, "title")
+  ]).replace(/\s*[-|]\s*(?:飞书|Feishu|Lark).*$/i, "").trim();
+  const description = firstDecodedHtmlValue([
+    metaContent(normalized, "property", "og:description"),
+    metaContent(normalized, "name", "description"),
+    metaContent(normalized, "name", "twitter:description")
+  ]);
+
+  const withoutExecutableContent = normalized
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(script|style|noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(header|nav|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+  const feishuPage = tagContentByAttribute(withoutExecutableContent, "data-block-type", "page");
+  const focused = feishuPage
+    || tagContent(withoutExecutableContent, "article")
+    || tagContent(withoutExecutableContent, "main")
+    || tagContent(withoutExecutableContent, "body");
+  const markdown = htmlFragmentToMarkdown(focused || "");
+  const cleanedMarkdown = feishuPage ? stripFeishuDocumentChrome(markdown, title) : markdown;
+  const fallback = description.length >= MIN_PUBLIC_CONTENT_LENGTH ? description : "";
+  const content = cleanedMarkdown.length >= MIN_PUBLIC_CONTENT_LENGTH ? cleanedMarkdown : fallback;
+  if (!content || looksLikeLoginPage(`${title}\n${content}`)) return undefined;
+  return { title, markdown: content };
+}
+
+function htmlFragmentToMarkdown(value: string): string {
+  return decodeHtmlEntities(value
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<h([1-6])\b[^>]*>/gi, (_match, level: string) => `\n\n${"#".repeat(Number(level))} `)
+    .replace(/<\/h[1-6]>/gi, "\n\n")
+    .replace(/<li\b[^>]*>/gi, "\n- ")
+    .replace(/<\/li>/gi, "")
+    .replace(/<(blockquote)\b[^>]*>/gi, "\n\n> ")
+    .replace(/<\/(blockquote)>/gi, "\n\n")
+    .replace(/<(p|div|section|article|main|tr|pre)\b[^>]*>/gi, "\n\n")
+    .replace(/<\/(p|div|section|article|main|tr|pre)>/gi, "\n\n")
+    .replace(/<(td|th)\b[^>]*>/gi, " | ")
+    .replace(/<\/(td|th)>/gi, "")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripFeishuDocumentChrome(markdown: string, title: string): string {
+  const blocks = markdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const normalizedTitle = normalizeMarkdownBlock(title);
+  const titleIndex = blocks.findIndex((block) => normalizeMarkdownBlock(block) === normalizedTitle);
+  if (titleIndex < 0) return markdown;
+
+  let contentStart = titleIndex + 1;
+  const metadataBoundary = Math.min(blocks.length, contentStart + 3);
+  while (
+    contentStart < metadataBoundary
+    && isFeishuPageMetadata(normalizeMarkdownBlock(blocks[contentStart]))
+  ) {
+    contentStart += 1;
+  }
+  return blocks.slice(contentStart).join("\n\n").trim() || markdown;
+}
+
+function normalizeMarkdownBlock(value: string): string {
+  return value.replace(/^#{1,6}\s*/, "").replace(/[\u200b\u200c\u200d\ufeff]/g, "").trim();
+}
+
+function isFeishuPageMetadata(value: string): boolean {
+  return /^(?:刚刚|今天|昨天|\d{1,2}月\d{1,2}日)\s*修改$/.test(value)
+    || /^(.{1,80})\s+\1$/u.test(value);
+}
+
+function metaContent(html: string, attribute: "name" | "property", value: string): string {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const forward = new RegExp(`<meta\\b[^>]*${attribute}=["']${escaped}["'][^>]*content=["']([^"']*)["'][^>]*>`, "i");
+  const reverse = new RegExp(`<meta\\b[^>]*content=["']([^"']*)["'][^>]*${attribute}=["']${escaped}["'][^>]*>`, "i");
+  return forward.exec(html)?.[1] || reverse.exec(html)?.[1] || "";
+}
+
+function tagContent(html: string, tag: string): string {
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`<${escaped}\\b[^>]*>([\\s\\S]*?)<\/${escaped}>`, "i").exec(html)?.[1] || "";
+}
+
+function tagContentByAttribute(html: string, attribute: string, value: string): string {
+  const escapedAttribute = attribute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedValue = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const opening = new RegExp(
+    `<([a-z][\\w:-]*)\\b[^>]*\\b${escapedAttribute}=["']${escapedValue}["'][^>]*>`,
+    "i"
+  ).exec(html);
+  if (!opening || opening.index === undefined) return "";
+
+  const tag = opening[1];
+  const contentStart = opening.index + opening[0].length;
+  const tagPattern = new RegExp(`<\\/?${tag}\\b[^>]*>`, "gi");
+  tagPattern.lastIndex = contentStart;
+  let depth = 1;
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(html))) {
+    if (match[0].startsWith("</")) depth -= 1;
+    else if (!match[0].endsWith("/>")) depth += 1;
+    if (depth === 0) return html.slice(contentStart, match.index);
+  }
+  return "";
+}
+
+function firstDecodedHtmlValue(values: string[]): string {
+  return values.map((value) => decodeHtmlEntities(value.replace(/<[^>]+>/g, " ")).trim()).find(Boolean) || "";
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&lt;|&#60;/gi, "<")
+    .replace(/&gt;|&#62;/gi, ">")
+    .replace(/&quot;|&#34;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&amp;|&#38;/gi, "&")
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+function looksLikeLoginPage(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").toLowerCase();
+  return /扫码登录|登录飞书|账号登录|手机号登录|sign in to lark|log in to lark/.test(normalized);
+}
+
+async function readResponseText(response: Response, limit: number): Promise<string> {
+  const declaredSize = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredSize) && declaredSize > limit) {
+    throw anonymousPreviewUnavailable("飞书公开页面过大，无法安全生成预览。");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      throw anonymousPreviewUnavailable("飞书公开页面过大，无法安全生成预览。");
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+function anonymousPreviewUnavailable(message: string) {
+  return new ConnectorError({
+    provider: "feishu",
+    code: "access_denied",
+    message,
+    status: 422
+  });
+}
+
+function safeUrl(value: string, base?: URL): URL | undefined {
+  try {
+    return new URL(value, base);
+  } catch {
+    return undefined;
   }
 }

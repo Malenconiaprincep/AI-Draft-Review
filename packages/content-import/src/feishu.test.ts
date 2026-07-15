@@ -21,6 +21,10 @@ test("resolves Feishu docx and wiki URLs", () => {
     connector.resolveDocument("https://acme.feishu.cn/wiki/wikcnWikiToken").kind,
     "wiki"
   );
+  assert.equal(
+    connector.resolveDocument("https://acme.larkoffice.com/docx/doxcnDocumentToken").kind,
+    "docx"
+  );
 });
 
 test("normalizes Feishu block trees, rich text, lists, tables and assets", () => {
@@ -100,6 +104,68 @@ test("uses OAuth, resolves wiki nodes and paginates block reads", async () => {
   const auth = new URL(connector.getAuthorizationUrl("csrf"));
   assert.equal(auth.searchParams.get("state"), "csrf");
   assert.match(auth.searchParams.get("scope") ?? "", /offline_access/);
+});
+
+test("imports an internet-shared document with a self-built app tenant token", async () => {
+  const requests: Array<{ url: string; authorization?: string }> = [];
+  const fetchMock = (async (input, init) => {
+    const url = String(input);
+    requests.push({
+      url,
+      authorization: new Headers(init?.headers).get("authorization") ?? undefined
+    });
+    if (url.endsWith("/auth/v3/tenant_access_token/internal")) {
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        app_id: "client",
+        app_secret: "secret"
+      });
+      return Response.json({ code: 0, tenant_access_token: "tenant-token", expire: 7200 });
+    }
+    if (url.endsWith("/docx/v1/documents/G45Sdeoino8s6JxLQiecn5Vqnpe")) {
+      return Response.json({
+        code: 0,
+        data: {
+          document: {
+            document_id: "G45Sdeoino8s6JxLQiecn5Vqnpe",
+            revision_id: 8,
+            title: "Public Feishu document"
+          }
+        }
+      });
+    }
+    if (url.includes("/docx/v1/documents/G45Sdeoino8s6JxLQiecn5Vqnpe/blocks")) {
+      return Response.json({
+        code: 0,
+        data: {
+          items: [
+            { block_id: "G45Sdeoino8s6JxLQiecn5Vqnpe", block_type: 1, children: ["p"] },
+            { block_id: "p", parent_id: "G45Sdeoino8s6JxLQiecn5Vqnpe", block_type: 2, text: { elements: [{ text_run: { content: "Shared body" } }] } }
+          ],
+          has_more: false
+        }
+      });
+    }
+    return Response.json({ code: 0, data: {} });
+  }) as FetchLike;
+  const connector = new FeishuConnector({
+    clientId: "client",
+    clientSecret: "secret",
+    redirectUri: "https://tutti.example/oauth/feishu",
+    fetch: fetchMock
+  });
+
+  const result = await connector.importPublicDocument(
+    "https://j8luzjm9ir.feishu.cn/docx/G45Sdeoino8s6JxLQiecn5Vqnpe?from=from_copylink"
+  );
+
+  assert.equal(result.title, "Public Feishu document");
+  assert.equal(result.doc.content?.[0]?.content?.[0]?.text, "Shared body");
+  assert.equal(
+    requests.filter((request) => request.url.includes("/docx/v1/")).every(
+      (request) => request.authorization === "Bearer tenant-token"
+    ),
+    true
+  );
 });
 
 test("exchanges and refreshes v2 OAuth tokens with rotating refresh expiry", async () => {

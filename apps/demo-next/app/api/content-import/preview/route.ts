@@ -4,7 +4,6 @@ import {
   createGoogleDocsConnector,
   createNotionConnector,
   createYouMindConnector,
-  feishuMcpFetchResultToImport,
   importConnectedDocument,
   notionMcpFetchResultToImport,
   type ContentImportResult,
@@ -15,6 +14,7 @@ import {
 import { NextResponse } from "next/server";
 import {
   createConfiguredGoogleDocsConnector,
+  createPublicGoogleDocsConnector,
   getGoogleDocsConnection,
   getGoogleDocsToken
 } from "../../../../lib/google-docs-demo";
@@ -25,12 +25,9 @@ import {
   persistNotionMcpSession
 } from "../../../../lib/notion-mcp-demo";
 import { localizeImportAssets } from "../../../../lib/local-import-assets";
-import { callFeishuMcpFetch } from "../../../../lib/feishu-mcp-demo";
 import {
-  getFeishuApiConfig,
   getFeishuConnection,
-  getFeishuToken,
-  isFeishuLocalDemoToken
+  importPublicFeishuDocument
 } from "../../../../lib/feishu-demo";
 import {
   getYouMindApiConfig,
@@ -50,16 +47,16 @@ const FIXTURE_SOURCES: Record<ConnectorProvider, string> = {
 
 export function GET(request: Request) {
   const notionMcp = getNotionMcpConnection(request);
-  const feishu = getFeishuConnection(request);
+  const feishu = getFeishuConnection();
   const youmind = getYouMindConnection(request);
   const googleDocs = getGoogleDocsConnection(request);
   return NextResponse.json({
     fixtureSources: FIXTURE_SOURCES,
     liveAvailable: {
-      notion: Boolean(process.env.NOTION_IMPORT_ACCESS_TOKEN || notionMcp.connected),
-      feishu: Boolean(process.env.FEISHU_IMPORT_ACCESS_TOKEN || feishu.connected),
+      notion: true,
+      feishu: true,
       youmind: youmind.connected,
-      googledocs: googleDocs.connected
+      googledocs: true
     },
     connections: {
       notion: {
@@ -70,10 +67,9 @@ export function GET(request: Request) {
         browserSessionPersistenceAvailable: isBrowserSessionPersistenceAvailable()
       },
       feishu: {
-        transport: "mcp",
+        transport: "public",
         available: feishu.available,
         connected: feishu.connected,
-        accountName: feishu.accountName,
         mode: feishu.mode,
         appType: feishu.appType
       },
@@ -111,16 +107,29 @@ export async function POST(request: Request) {
         : FIXTURE_SOURCES[provider];
     const fixture = mode === "fixture";
 
+    if (!fixture && provider === "feishu") {
+      const imported = await importPublicFeishuDocument(request, source);
+      return importResponse(mode, await localizeImportAssets(imported), "public");
+    }
+
     if (!fixture && provider === "googledocs") {
+      const publicConnector = createPublicGoogleDocsConnector();
+      try {
+        const imported = await publicConnector.importPublicDocument(source);
+        return importResponse(mode, await localizeImportAssets(imported), "public");
+      } catch (error) {
+        if (!isGooglePublicAuthorizationFailure(error)) throw error;
+      }
+
       if (!getGoogleDocsConnection(request).connected) {
-        return errorResponse("请先连接个人 Google 账号。", 401);
+        return googleAuthorizationRequiredResponse("这篇 Google Docs 不是公开文档，请先通过 Google Picker 授权。");
       }
       const connector = createConfiguredGoogleDocsConnector();
       const token = await getGoogleDocsToken(request);
       const selectedDocumentId = token.metadata?.selectedDocumentId;
       const requestedDocumentId = connector.resolveDocument(source).id;
       if (selectedDocumentId !== requestedDocumentId) {
-        return errorResponse("请通过 Google Picker 选择这篇文档后再导入。", 403);
+        return googleAuthorizationRequiredResponse("请通过 Google Picker 选择这篇文档后再导入。", 403);
       }
       const imported = await importConnectedDocument({
         connector,
@@ -131,8 +140,16 @@ export async function POST(request: Request) {
     }
 
     if (!fixture && provider === "youmind") {
+      const publicConnector = createYouMindConnector(getYouMindApiConfig());
+      try {
+        const imported = await publicConnector.importPublicDocument(source);
+        return importResponse(mode, await localizeImportAssets(imported), "public");
+      } catch (error) {
+        if (!isYouMindPublicAuthorizationFailure(error)) throw error;
+      }
+
       if (!getYouMindConnection(request).connected) {
-        return errorResponse("请先连接 YouMind API Key。", 401);
+        return youMindAuthorizationRequiredResponse("这个 YouMind 链接无法公开读取，请先连接 API Key。", 401);
       }
       const connector = createYouMindConnector(getYouMindApiConfig());
       const imported = await importConnectedDocument({
@@ -143,9 +160,33 @@ export async function POST(request: Request) {
       return importResponse(mode, await localizeImportAssets(imported), "openapi");
     }
 
-    if (!fixture && provider === "notion" && !process.env.NOTION_IMPORT_ACCESS_TOKEN) {
+    if (!fixture && provider === "notion") {
+      const publicConnector = createNotionConnector({
+        clientId: "public-preview",
+        clientSecret: "public-preview",
+        redirectUri: "http://localhost:3000/import-demo"
+      });
+      try {
+        const imported = await publicConnector.importPublicDocument(source);
+        return importResponse(mode, await localizeImportAssets(imported), "public");
+      } catch (error) {
+        if (!isNotionPublicAuthorizationFailure(error)) throw error;
+      }
+
+      const configuredToken = liveToken("notion");
+      if (configuredToken) {
+        const imported = await importConnectedDocument({
+          connector: publicConnector,
+          token: configuredToken,
+          source
+        });
+        return importResponse(mode, await localizeImportAssets(imported), "rest");
+      }
+
       if (!getNotionMcpConnection(request).connected) {
-        return errorResponse("请先点击 Connect Notion 完成 MCP 授权。", 401);
+        return notionAuthorizationRequiredResponse(
+          "这个 Notion 页面无法公开读取，请先连接 Notion 后重试。"
+        );
       }
       const notionMcpResult = await callNotionMcpFetch(request, source);
       const result = await localizeImportAssets(
@@ -156,40 +197,9 @@ export async function POST(request: Request) {
 
     const token = fixture
       ? { accessToken: "fixture-access-token", tokenType: "bearer" as const }
-      : provider === "feishu" && !process.env.FEISHU_IMPORT_ACCESS_TOKEN
-        ? await getFeishuToken(request)
-        : liveToken(provider);
+      : liveToken(provider);
     if (!token) {
-      return errorResponse(
-        `服务端尚未配置 ${provider === "notion" ? "NOTION_IMPORT_ACCESS_TOKEN" : "FEISHU_IMPORT_ACCESS_TOKEN"}。`,
-        400
-      );
-    }
-
-    if (!fixture && provider === "feishu" && isFeishuLocalDemoToken(token)) {
-      const connector = createFeishuConnector({
-        clientId: "local-store-demo",
-        clientSecret: "local-store-demo",
-        redirectUri: "http://localhost:3000/api/connectors/feishu/callback",
-        fetch: createFeishuFixtureFetch()
-      });
-      const result = await importConnectedDocument({ connector, token, source });
-      return importResponse(mode, result, "fixture");
-    }
-
-    if (!fixture && provider === "feishu") {
-      try {
-        const mcpResult = feishuMcpFetchResultToImport(
-          await callFeishuMcpFetch(token, source),
-          source
-        );
-        return importResponse(mode, await localizeImportAssets(mcpResult), "mcp");
-      } catch (error) {
-        console.warn(
-          "Feishu MCP import unavailable; falling back to REST blocks:",
-          error instanceof Error ? error.message : "unknown error"
-        );
-      }
+      return errorResponse("服务端尚未配置 NOTION_IMPORT_ACCESS_TOKEN。", 400);
     }
 
     const connector =
@@ -202,10 +212,9 @@ export async function POST(request: Request) {
           })
         : provider === "feishu"
           ? createFeishuConnector({
-            clientId: process.env.FEISHU_APP_ID || "demo-client",
-            clientSecret: process.env.FEISHU_APP_SECRET || "demo-secret",
+            clientId: "demo-client",
+            clientSecret: "demo-secret",
             redirectUri: "http://localhost:3000/import-demo",
-            ...getFeishuApiConfig(),
             fetch: fixture ? createFeishuFixtureFetch() : undefined
           })
           : provider === "youmind"
@@ -230,7 +239,7 @@ export async function POST(request: Request) {
           provider: error.provider,
           retryable: error.retryable
         },
-        { status: error.status && error.status < 500 ? error.status : 502 }
+        { status: error.status && error.status >= 400 && error.status < 500 ? error.status : 502 }
       );
     }
     console.error("Content import preview failed", error);
@@ -256,8 +265,7 @@ function liveToken(provider: ConnectorProvider): ConnectorToken | undefined {
     const apiKey = process.env.YOUMIND_IMPORT_API_KEY;
     return apiKey ? { accessToken: apiKey, tokenType: "bearer" } : undefined;
   }
-  const accessToken = process.env.FEISHU_IMPORT_ACCESS_TOKEN;
-  return accessToken ? { accessToken, tokenType: "bearer" } : undefined;
+  return undefined;
 }
 
 function createYouMindFixtureFetch(): FetchLike {
@@ -302,7 +310,7 @@ function createGoogleDocsFixtureFetch(): FetchLike {
 function importResponse(
   mode: "fixture" | "live",
   result: ContentImportResult,
-  transport: "fixture" | "mcp" | "rest" | "openapi"
+  transport: "fixture" | "mcp" | "rest" | "openapi" | "public"
 ) {
   return NextResponse.json({
     mode,
@@ -317,6 +325,68 @@ function importResponse(
       }))
     }
   });
+}
+
+function isGooglePublicAuthorizationFailure(error: unknown): boolean {
+  return error instanceof ConnectorError
+    && error.provider === "googledocs"
+    && (error.code === "access_denied" || error.code === "not_found");
+}
+
+function isNotionPublicAuthorizationFailure(error: unknown): boolean {
+  return error instanceof ConnectorError
+    && error.provider === "notion"
+    && (
+      error.code === "access_denied"
+      || error.code === "not_found"
+      || error.code === "invalid_provider_response"
+    );
+}
+
+function isYouMindPublicAuthorizationFailure(error: unknown): boolean {
+  return error instanceof ConnectorError
+    && error.provider === "youmind"
+    && (
+      error.code === "access_denied"
+      || error.code === "not_found"
+      || error.code === "invalid_source"
+    );
+}
+
+function googleAuthorizationRequiredResponse(message: string, status = 401) {
+  return NextResponse.json(
+    {
+      error: message,
+      code: "access_denied",
+      provider: "googledocs",
+      authorizationRequired: true
+    },
+    { status }
+  );
+}
+
+function notionAuthorizationRequiredResponse(message: string, status = 401) {
+  return NextResponse.json(
+    {
+      error: message,
+      code: "access_denied",
+      provider: "notion",
+      authorizationRequired: true
+    },
+    { status }
+  );
+}
+
+function youMindAuthorizationRequiredResponse(message: string, status = 401) {
+  return NextResponse.json(
+    {
+      error: message,
+      code: "access_denied",
+      provider: "youmind",
+      authorizationRequired: true
+    },
+    { status }
+  );
 }
 
 function errorResponse(message: string, status: number) {

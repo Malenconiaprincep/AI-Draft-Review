@@ -1,14 +1,17 @@
-# Notion MCP 连接与真实导入指南
+# Notion 公开链接、MCP 连接与真实导入指南
 
 ## 方案结论
 
-Tutti 的主连接方式是 Notion 官方托管 MCP：
+Tutti 对 `notion.so`、`notion.site` 和 `app.notion.com/p/...` 页面采用两级读取：
+
+1. 先匿名读取已开启“Anyone on the web with link”的公开页面，不要求用户绑定账号。
+2. 匿名读取失败时，再提示用户通过 Notion 官方托管 MCP 连接工作区：
 
 ```text
 https://mcp.notion.com/mcp
 ```
 
-用户点击 `Connect Notion via MCP` 后，Tutti 作为 MCP Client 完成 OAuth Discovery、动态客户端注册、PKCE 和用户授权；连接成功后调用 `notion-fetch` 读取页面，再转换为 Tutti `DraftDocJSON`。
+用户点击 `Connect Notion via MCP` 后，Tutti 作为 MCP Client 完成 OAuth Discovery、动态客户端注册、PKCE 和用户授权；连接成功后调用 `notion-fetch` 读取页面，再转换为 Tutti `DraftDocJSON`。公开链接路径不保存 Cookie 或 Token，只请求 Notion 向匿名访客返回的只读 Block 数据。
 
 这条链路不需要 Tutti 团队在 Notion Developer portal 手工创建 Public connection，也不需要配置 Notion Client ID 或 Client Secret。
 
@@ -21,10 +24,11 @@ https://mcp.notion.com/mcp
    ```
 
 2. 打开 [http://localhost:3000/import-demo](http://localhost:3000/import-demo)。
-3. 选择 Notion，点击 `Connect Notion via MCP`。
-4. 在 Notion 官方授权页登录并确认授权。
-5. 授权完成后自动回到 Demo，并自动获取最近修改的页面。
-6. 选择页面并点击“导入选中文档”。
+3. 粘贴 Notion 公开链接可直接预览和导入。
+4. 如果页面不是公开页面，点击 `Connect Notion via MCP`。
+5. 在 Notion 官方授权页登录并确认授权。
+6. 授权完成后自动回到 Demo，并自动获取最近修改的页面。
+7. 选择页面并点击“导入选中文档”。
 
 授权取消、`state` 校验失败或 MCP 暂时不可用时，Demo 会显示对应错误，不会保存 Token。
 
@@ -45,8 +49,10 @@ GET /api/connectors/notion/callback
   → 回到 /import-demo
 
 POST /api/content-import/preview
-  → 调用 notion-fetch(id: <page URL or ID>)
-  → 解析 MCP 文本/结构化响应
+  → 识别 notion.so / notion.site / notion.com 页面 ID
+  → 优先匿名读取公开页面 Block 数据
+  → 公开读取失败时调用 notion-fetch(id: <page URL or ID>)
+  → 解析公开 Block 或 MCP 文本/结构化响应
   → 转为 CanonicalDocument
   → 转为 DraftDocJSON
 ```
@@ -79,6 +85,8 @@ NOTION_IMPORT_ACCESS_TOKEN=<installation-access-token>
 
 ## 当前限制
 
+- 匿名导入依赖 Notion Web 公开页面的只读数据接口；它不是官方 Public API，页面结构变化时可能需要同步更新解析器。
+- 公开页面中的数据库视图、评论、权限信息和部分高级 Block 会降级为链接或文本。
 - Notion MCP 是用户型 OAuth，不能用 Bearer Token 做完全无人值守连接。
 - `notion-fetch` 支持按页面 URL/ID读取内容；页面搜索可在后续使用 `notion-search`。
 - Notion MCP 当前不支持文件上传。导入发现的远端素材仍需 Tutti 服务端下载并转存。

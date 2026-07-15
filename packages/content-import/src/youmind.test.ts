@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { YouMindConnector, parseYouMindFileId } from "./youmind.ts";
+import {
+  YouMindConnector,
+  parseYouMindFileId,
+  parseYouMindPublicShareId
+} from "./youmind.ts";
 import type { ConnectorToken, FetchLike } from "./types.ts";
 
 const token: ConnectorToken = { accessToken: "sk-ym-test-key-123", tokenType: "bearer" };
@@ -10,6 +14,44 @@ test("parses YouMind file IDs and links", () => {
   assert.equal(parseYouMindFileId(id), id);
   assert.equal(parseYouMindFileId(`https://youmind.com/crafts/${id}`), id);
   assert.equal(parseYouMindFileId("https://example.com/not-youmind"), undefined);
+  assert.equal(parseYouMindPublicShareId("https://youmind.com/s/fGHbM9Si7QKJlJ"), "fGHbM9Si7QKJlJ");
+  assert.equal(parseYouMindPublicShareId(`https://youmind.com/crafts/${id}`), undefined);
+});
+
+test("imports a public YouMind share without an API key", async () => {
+  const id = "019ab478-a38d-7120-891e-b0b59a2212d0";
+  const markdown = "# Public story\n\n公开内容无需授权。\n\n![Hero](https://cdn.example/public.png)";
+  const plainRecord = `1a:T${Buffer.byteLength(markdown, "utf8").toString(16)},${markdown}`;
+  const snipRecord = `6:["$","component",null,{"snip":${JSON.stringify({
+    id,
+    updated_at: "2026-07-15T03:31:15.733Z",
+    type: "article",
+    title: "Public story",
+    visibility: "public",
+    content: { format: "reader-html", plain: "$1a" }
+  })}}]`;
+  const html = `<html><body><script>self.__next_f.push([1,${JSON.stringify(`${plainRecord}${snipRecord}`)}])</script></body></html>`;
+  const calls: Array<{ url: string; authorization: string | null }> = [];
+  const connector = new YouMindConnector({
+    publicShareBaseUrl: "https://share.example",
+    fetch: (async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization")
+      });
+      return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }) as FetchLike
+  });
+
+  const result = await connector.importPublicDocument("https://youmind.com/s/fGHbM9Si7QKJlJ");
+
+  assert.deepEqual(calls, [{ url: "https://share.example/s/fGHbM9Si7QKJlJ", authorization: null }]);
+  assert.equal(result.source.id, id);
+  assert.equal(result.source.url, "https://youmind.com/s/fGHbM9Si7QKJlJ");
+  assert.equal(result.sourceRevision, "2026-07-15T03:31:15.733Z");
+  assert.equal(result.title, "Public story");
+  assert.equal(result.doc.content?.[0]?.type, "heading");
+  assert.equal(result.assets[0]?.sourceUrl, "https://cdn.example/public.png");
 });
 
 test("lists boards and files with the official OpenAPI headers", async () => {

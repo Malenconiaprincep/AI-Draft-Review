@@ -11,7 +11,9 @@ import {
 
 test("a configured server key still requires an explicit YouMind session", () => {
   const previousApiKey = process.env.YOUMIND_IMPORT_API_KEY;
+  const previousNodeEnv = process.env.NODE_ENV;
   process.env.YOUMIND_IMPORT_API_KEY = "sk-ym-configured-test-key";
+  Object.assign(process.env, { NODE_ENV: "production" });
 
   try {
     const request = new Request("http://localhost/import-demo");
@@ -26,6 +28,25 @@ test("a configured server key still requires an explicit YouMind session", () =>
   } finally {
     if (previousApiKey === undefined) delete process.env.YOUMIND_IMPORT_API_KEY;
     else process.env.YOUMIND_IMPORT_API_KEY = previousApiKey;
+    if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
+    else Object.assign(process.env, { NODE_ENV: previousNodeEnv });
+  }
+});
+
+test("development keeps the personal YouMind API key input available", () => {
+  const previousApiKey = process.env.YOUMIND_IMPORT_API_KEY;
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.YOUMIND_IMPORT_API_KEY = "sk-ym-configured-test-key";
+  Object.assign(process.env, { NODE_ENV: "development" });
+
+  try {
+    const connection = getYouMindConnection(new Request("http://localhost/import-demo"));
+    assert.equal(connection.mode, "api-key");
+  } finally {
+    if (previousApiKey === undefined) delete process.env.YOUMIND_IMPORT_API_KEY;
+    else process.env.YOUMIND_IMPORT_API_KEY = previousApiKey;
+    if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
+    else Object.assign(process.env, { NODE_ENV: previousNodeEnv });
   }
 });
 

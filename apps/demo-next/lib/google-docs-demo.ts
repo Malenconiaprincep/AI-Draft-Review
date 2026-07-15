@@ -180,6 +180,10 @@ export function createConfiguredGoogleDocsConnector() {
   return createGoogleDocsConnector(requireGoogleDocsConfig());
 }
 
+export function createPublicGoogleDocsConnector() {
+  return createGoogleDocsConnector({ clientId: "public-link-import" });
+}
+
 function requireGoogleDocsConfig(): GoogleDocsConnectorConfig {
   const clientId = getGoogleDocsPickerConfig().clientId;
   if (!clientId) throw new Error("missing_google_docs_config");

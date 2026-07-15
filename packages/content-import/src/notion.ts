@@ -2,6 +2,7 @@ import { canonicalDocumentToDraftDoc } from "./canonical.ts";
 import { ConnectorError, errorCodeForStatus, readErrorBody } from "./errors.ts";
 import { parseMarkdownToCanonical } from "./markdown.ts";
 import { notionMarkdownAdapter } from "./notion-markdown-adapter.ts";
+import { importPublicNotionDocument } from "./notion-public.ts";
 import type {
   CanonicalDocument,
   ConnectorDocumentPage,
@@ -20,6 +21,7 @@ export type NotionConnectorConfig = {
   clientSecret: string;
   redirectUri: string;
   apiBaseUrl?: string;
+  publicApiBaseUrl?: string;
   fetch?: FetchLike;
 };
 
@@ -47,11 +49,13 @@ export class NotionConnector implements ContentConnector {
   private readonly config: NotionConnectorConfig;
   private readonly fetchImpl: FetchLike;
   private readonly apiBaseUrl: string;
+  private readonly publicApiBaseUrl: string;
 
   constructor(config: NotionConnectorConfig) {
     this.config = config;
     this.fetchImpl = config.fetch ?? fetch;
     this.apiBaseUrl = (config.apiBaseUrl ?? "https://api.notion.com").replace(/\/$/, "");
+    this.publicApiBaseUrl = (config.publicApiBaseUrl ?? "https://www.notion.so").replace(/\/$/, "");
   }
 
   getAuthorizationUrl(state: string): string {
@@ -167,6 +171,14 @@ export class NotionConnector implements ContentConnector {
   async importDocument(token: ConnectorToken, urlOrId: string): Promise<ContentImportResult> {
     const ref = this.resolveDocument(urlOrId);
     return canonicalDocumentToDraftDoc(await this.fetchDocument(token, ref));
+  }
+
+  async importPublicDocument(source: string): Promise<ContentImportResult> {
+    return importPublicNotionDocument({
+      fetch: this.fetchImpl,
+      apiBaseUrl: this.publicApiBaseUrl,
+      ref: this.resolveDocument(source)
+    });
   }
 
   private async fetchCompleteMarkdown(

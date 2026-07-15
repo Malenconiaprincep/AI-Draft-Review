@@ -5,6 +5,7 @@ export * from "./feishu.ts";
 export * from "./google-docs.ts";
 export * from "./markdown.ts";
 export * from "./notion.ts";
+export * from "./notion-public.ts";
 export * from "./notion-mcp.ts";
 export * from "./service.ts";
 export * from "./types.ts";

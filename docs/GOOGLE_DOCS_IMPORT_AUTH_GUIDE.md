@@ -2,7 +2,7 @@
 
 ## 方案结论
 
-当前 Demo 使用 Google Picker + `drive.file`：用户用个人 Google 账号授权，在 Google 官方弹窗中选择一篇 Docs，Tutti 只获得该文档的访问权并导入正文。
+当前 Demo 对粘贴的 Google Docs 链接采用 public-first：先尝试匿名导入公开文档；只有文档无法公开读取时，才使用 Google Picker + `drive.file`，让用户在 Google 官方弹窗中授权单篇 Docs。
 
 ## 完整流程图
 
@@ -16,7 +16,13 @@ flowchart LR
         Cloud --> APIs --> Client --> Publish
     end
 
-    subgraph UserFlow["每个第三方用户独立授权"]
+    subgraph PublicFlow["公开文档"]
+        Link["粘贴 Google Docs 链接"]
+        PublicExport["匿名 export?format=md"]
+        Link --> PublicExport
+    end
+
+    subgraph UserFlow["私有文档按篇授权"]
         Tutti["Tutti：连接 Google"]
         OAuth["Google OAuth 同意页"]
         Token["该用户的短期 Access Token"]
@@ -32,6 +38,7 @@ flowchart LR
         Editor["Tiptap 编辑器：标题 + 正文"]
         DocId --> Metadata
         DocId --> Export --> Draft --> Editor
+        PublicExport --> Draft
     end
 
     Client --> OAuth
@@ -117,7 +124,10 @@ POST /api/connectors/google-docs/authorize
   → 浏览器保存随机 HttpOnly Session Cookie
 
 POST /api/content-import/preview
-  → 强制 source ID 等于本次 Picker 选中的文档 ID
+  → 先请求公开 export?format=md
+  → 成功时无需 Google 登录或 OAuth，直接导入 Markdown
+  → 公开读取失败时要求 Google Picker 授权
+  → 授权路径强制 source ID 等于本次 Picker 选中的文档 ID
   → Drive API files.get 读取标题、版本与修改时间
   → Drive API files.export?mimeType=text/markdown
   → Markdown 转 CanonicalDocument
@@ -127,6 +137,8 @@ POST /api/content-import/preview
 
 ## 授权与安全边界
 
+- 公开文档只接受可解析出 Document ID 的 `docs.google.com/document/d/...` 地址；服务端根据 ID 构造匿名导出地址，不请求用户 Token。
+- 匿名导出必须返回 Markdown Content-Type；登录页或其他 HTML 响应不会被当作文档导入，而会切换到 Picker 授权流程。
 - 个人 Google 账号即可授权，不要求 Google Workspace 管理员或服务账号。
 - Google access token 必须传给 Picker，因此会短暂存在于当前页面内存。默认不会写入 Local Storage、URL 或日志；设置 `BROWSER_SESSION_PERSISTENCE=true` 后可显示默认关闭的实验开关，用户手动开启时会写入当前浏览器 Local Storage。
 - 选中后 access token 通过同源 HTTPS POST 交给 Tutti 服务端，浏览器随后只使用 HttpOnly Session Cookie。
@@ -137,8 +149,9 @@ POST /api/content-import/preview
 
 ## 当前转换范围
 
-- 标题使用 Drive `files.get` 返回的文件名，不依赖正文第一行。
+- 公开导入从导出响应文件名读取标题；授权导入使用 Drive `files.get` 返回的文件名，均不依赖正文第一行。
 - 正文优先使用 Google 官方 `text/markdown` 导出，统一解析普通段落、标题、粗体、斜体、删除线、链接、等宽文本、列表、表格、分割线和图片引用。
+- 公开导入同时读取 HTML 样式导出以恢复段落左对齐、居中、右对齐和两端对齐；授权回退路径读取 Docs API `paragraphStyle.alignment`。
 - Markdown 导出为空时返回 `partial_document` warning。
 - Markdown 导出接口异常时回退原有 Docs API 结构化解析，继续支持多 Tab、表格、列表和内嵌图片。
 - 外部图片仍通过素材清单交给宿主转存，不能把临时地址当作永久 Tutti 素材地址。

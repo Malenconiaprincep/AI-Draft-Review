@@ -19,6 +19,7 @@ import type {
 
 const GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document";
 const GOOGLE_MARKDOWN_MIME_TYPE = "text/markdown";
+const GOOGLE_PUBLIC_MARKDOWN_MIME_TYPE = "text/x-markdown";
 const DEFAULT_SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 
 export type GoogleDocsConnectorConfig = {
@@ -30,6 +31,7 @@ export type GoogleDocsConnectorConfig = {
   tokenUrl?: string;
   docsApiBaseUrl?: string;
   driveApiBaseUrl?: string;
+  publicDocsBaseUrl?: string;
   fetch?: FetchLike;
 };
 
@@ -65,7 +67,7 @@ type GoogleParagraphElement = {
 };
 
 type GoogleParagraph = {
-  paragraphStyle?: { namedStyleType?: string };
+  paragraphStyle?: { namedStyleType?: string; alignment?: string };
   bullet?: { listId?: string; nestingLevel?: number };
   elements?: GoogleParagraphElement[];
 };
@@ -139,6 +141,7 @@ export class GoogleDocsConnector implements ContentConnector {
   private readonly tokenUrl: string;
   private readonly docsApiBaseUrl: string;
   private readonly driveApiBaseUrl: string;
+  private readonly publicDocsBaseUrl: string;
 
   constructor(config: GoogleDocsConnectorConfig) {
     this.config = config;
@@ -147,6 +150,7 @@ export class GoogleDocsConnector implements ContentConnector {
     this.tokenUrl = config.tokenUrl ?? "https://oauth2.googleapis.com/token";
     this.docsApiBaseUrl = (config.docsApiBaseUrl ?? "https://docs.googleapis.com/v1").replace(/\/$/, "");
     this.driveApiBaseUrl = (config.driveApiBaseUrl ?? "https://www.googleapis.com/drive/v3").replace(/\/$/, "");
+    this.publicDocsBaseUrl = (config.publicDocsBaseUrl ?? "https://docs.google.com").replace(/\/$/, "");
   }
 
   getAuthorizationUrl(state: string): string {
@@ -308,6 +312,88 @@ export class GoogleDocsConnector implements ContentConnector {
     );
   }
 
+  async fetchPublicDocument(ref: ExternalDocumentRef): Promise<CanonicalDocument> {
+    if (ref.provider !== "googledocs") {
+      throw new ConnectorError({
+        provider: "googledocs",
+        code: "invalid_source",
+        message: "文档引用不属于 Google Docs。"
+      });
+    }
+
+    const exportUrl = this.publicExportUrl(ref, "md");
+    const response = await this.fetchImpl(exportUrl.toString(), {
+      headers: { Accept: `${GOOGLE_MARKDOWN_MIME_TYPE},${GOOGLE_PUBLIC_MARKDOWN_MIME_TYPE}` }
+    });
+    if (!response.ok) {
+      const code = errorCodeForStatus(response.status);
+      throw new ConnectorError({
+        provider: "googledocs",
+        code,
+        message: "这篇 Google Docs 无法公开读取，需要通过 Google Picker 授权。",
+        status: response.status,
+        retryable: code === "rate_limited" || response.status >= 500,
+        details: await readErrorBody(response)
+      });
+    }
+
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (
+      !contentType.includes(GOOGLE_MARKDOWN_MIME_TYPE)
+      && !contentType.includes(GOOGLE_PUBLIC_MARKDOWN_MIME_TYPE)
+    ) {
+      throw new ConnectorError({
+        provider: "googledocs",
+        code: "access_denied",
+        message: "这篇 Google Docs 没有开放匿名导出，需要通过 Google Picker 授权。",
+        status: 403,
+        details: { contentType }
+      });
+    }
+
+    const title = publicGoogleDocsTitle(response.headers.get("content-disposition"));
+    const document = normalizeGoogleMarkdownDocument(ref, await response.text(), {
+      id: ref.id,
+      name: title,
+      mimeType: GOOGLE_DOC_MIME_TYPE,
+      webViewLink: ref.url ?? `https://docs.google.com/document/d/${ref.id}/edit`
+    });
+    try {
+      const htmlResponse = await this.fetchImpl(this.publicExportUrl(ref, "html").toString(), {
+        headers: { Accept: "text/html" }
+      });
+      const contentType = htmlResponse.headers.get("content-type")?.toLowerCase() ?? "";
+      if (htmlResponse.ok && contentType.includes("text/html")) {
+        applyGoogleHtmlParagraphAlignments(document.content, await htmlResponse.text());
+      } else {
+        document.warnings.push({
+          code: "format_downgraded",
+          message: "Google Docs 的 HTML 样式导出不可用，段落对齐方式可能未保留。"
+        });
+      }
+    } catch {
+      document.warnings.push({
+        code: "format_downgraded",
+        message: "Google Docs 的 HTML 样式导出失败，段落对齐方式可能未保留。"
+      });
+    }
+    return document;
+  }
+
+  async importPublicDocument(urlOrId: string): Promise<ContentImportResult> {
+    return canonicalDocumentToDraftDoc(
+      await this.fetchPublicDocument(this.resolveDocument(urlOrId))
+    );
+  }
+
+  private publicExportUrl(ref: ExternalDocumentRef, format: "md" | "html"): URL {
+    const url = new URL(
+      `${this.publicDocsBaseUrl}/document/d/${encodeURIComponent(ref.id)}/export`
+    );
+    url.searchParams.set("format", format);
+    return url;
+  }
+
   private async tokenRequest(body: Record<string, string>): Promise<JsonRecord> {
     const response = await this.fetchImpl(this.tokenUrl, {
       method: "POST",
@@ -381,6 +467,137 @@ export function parseGoogleDocId(input: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function publicGoogleDocsTitle(contentDisposition: string | null): string {
+  if (!contentDisposition) return "Untitled Google Doc";
+  const encoded = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plain = contentDisposition.match(/filename="([^"]+)"/i)?.[1];
+  let filename = plain;
+  if (encoded) {
+    try {
+      filename = decodeURIComponent(encoded);
+    } catch {
+      filename = plain;
+    }
+  }
+  const title = filename?.replace(/\.md$/i, "").trim();
+  return title || "Untitled Google Doc";
+}
+
+type ParagraphAlignment = "left" | "center" | "right" | "justify";
+
+type HtmlParagraphAlignment = {
+  text: string;
+  textAlign: ParagraphAlignment;
+};
+
+export function applyGoogleHtmlParagraphAlignments(
+  content: CanonicalNode[],
+  html: string
+): void {
+  const htmlParagraphs = extractGoogleHtmlParagraphAlignments(html);
+  let htmlCursor = 0;
+
+  const visit = (node: CanonicalNode) => {
+    if (node.type === "paragraph" || node.type === "heading") {
+      const lines = canonicalAlignmentLines(node);
+      if (!lines.length) return;
+      const matches: HtmlParagraphAlignment[] = [];
+      let nextCursor = htmlCursor;
+      for (const line of lines) {
+        const matchIndex = htmlParagraphs.findIndex(
+          (paragraph, index) => index >= nextCursor && paragraph.text === line
+        );
+        if (matchIndex < 0) return;
+        matches.push(htmlParagraphs[matchIndex]);
+        nextCursor = matchIndex + 1;
+      }
+      htmlCursor = nextCursor;
+      const textAlign = matches[0]?.textAlign;
+      if (textAlign && matches.every((match) => match.textAlign === textAlign)) {
+        node.attrs = { ...node.attrs, textAlign };
+      }
+      return;
+    }
+    node.content?.forEach(visit);
+  };
+
+  content.forEach(visit);
+}
+
+function extractGoogleHtmlParagraphAlignments(html: string): HtmlParagraphAlignment[] {
+  const classAlignments = new Map<string, ParagraphAlignment>();
+  const classRule = /\.([A-Za-z0-9_-]+)\s*\{([^}]*)\}/g;
+  for (const match of html.matchAll(classRule)) {
+    const textAlign = cssTextAlignment(match[2]);
+    if (textAlign) classAlignments.set(match[1], textAlign);
+  }
+
+  const paragraphs: HtmlParagraphAlignment[] = [];
+  const block = /<(p|h[1-6]|li)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+  for (const match of html.matchAll(block)) {
+    const attributes = match[2];
+    const lines = decodeHtmlText(match[3]).split("\n").map(normalizeAlignmentText).filter(Boolean);
+    if (!lines.length) continue;
+    const inlineAlignment = cssTextAlignment(
+      attributes.match(/\bstyle=(?:"([^"]*)"|'([^']*)')/i)?.slice(1).find(Boolean)
+    );
+    const classes = attributes
+      .match(/\bclass=(?:"([^"]*)"|'([^']*)')/i)
+      ?.slice(1)
+      .find(Boolean)
+      ?.split(/\s+/)
+      .filter(Boolean) ?? [];
+    const classAlignment = classes.reduce<ParagraphAlignment | undefined>(
+      (alignment, className) => classAlignments.get(className) ?? alignment,
+      undefined
+    );
+    const textAlign = inlineAlignment ?? classAlignment ?? "left";
+    paragraphs.push(...lines.map((text) => ({ text, textAlign })));
+  }
+  return paragraphs;
+}
+
+function canonicalAlignmentLines(node: CanonicalNode): string[] {
+  const text = (node.content ?? []).map(canonicalAlignmentText).join("");
+  return text.split("\n").map(normalizeAlignmentText).filter(Boolean);
+}
+
+function canonicalAlignmentText(node: CanonicalNode): string {
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return "\n";
+  return node.content?.map(canonicalAlignmentText).join("") ?? "";
+}
+
+function cssTextAlignment(css: string | undefined): ParagraphAlignment | undefined {
+  const value = css?.match(/(?:^|;)\s*text-align\s*:\s*(left|center|right|justify|start|end)\b/i)?.[1];
+  if (!value) return undefined;
+  if (/^start$/i.test(value)) return "left";
+  if (/^end$/i.test(value)) return "right";
+  return value.toLowerCase() as ParagraphAlignment;
+}
+
+function decodeHtmlText(value: string): string {
+  const withoutTags = value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+  return withoutTags.replace(/&(#x?[0-9a-f]+|nbsp|amp|lt|gt|quot|apos);/gi, (_match, entity: string) => {
+    const normalized = entity.toLowerCase();
+    if (normalized === "nbsp") return " ";
+    if (normalized === "amp") return "&";
+    if (normalized === "lt") return "<";
+    if (normalized === "gt") return ">";
+    if (normalized === "quot") return '"';
+    if (normalized === "apos") return "'";
+    const radix = normalized.startsWith("#x") ? 16 : 10;
+    const codePoint = Number.parseInt(normalized.replace(/^#x?/, ""), radix);
+    return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : _match;
+  });
+}
+
+function normalizeAlignmentText(value: string): string {
+  return value.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
 }
 
 export function normalizeGoogleMarkdownDocument(
@@ -524,9 +741,14 @@ function convertStructuralElements(
           candidate.bullet.nestingLevel ?? 0
         );
         if (candidateOrdered !== ordered) break;
+        const textAlign = googleParagraphAlignment(candidate.paragraphStyle?.alignment);
         items.push({
           type: "listItem",
-          content: [{ type: "paragraph", content: inlineParagraphContent(candidate, context) }]
+          content: [{
+            type: "paragraph",
+            ...(textAlign ? { attrs: { textAlign } } : {}),
+            content: inlineParagraphContent(candidate, context)
+          }]
         });
         index += 1;
       }
@@ -561,6 +783,7 @@ function convertParagraph(paragraphValue: GoogleParagraph, context: ConversionCo
   if (elements.some((element) => element.horizontalRule)) return [{ type: "horizontalRule" }];
   const inline = paragraphInlineContent(paragraphValue, context);
   const style = paragraphValue.paragraphStyle?.namedStyleType ?? "NORMAL_TEXT";
+  const textAlign = googleParagraphAlignment(paragraphValue.paragraphStyle?.alignment);
   const heading = style.match(/^HEADING_([1-6])$/);
   const blockType = heading || style === "TITLE" || style === "SUBTITLE" ? "heading" : "paragraph";
   const level = heading ? Number(heading[1]) : style === "TITLE" ? 1 : style === "SUBTITLE" ? 2 : undefined;
@@ -570,7 +793,7 @@ function convertParagraph(paragraphValue: GoogleParagraph, context: ConversionCo
     if (!currentInline.length && result.length) return;
     result.push({
       type: blockType,
-      ...(level ? { attrs: { level } } : {}),
+      ...(level || textAlign ? { attrs: { ...(level ? { level } : {}), ...(textAlign ? { textAlign } : {}) } } : {}),
       content: currentInline
     });
     currentInline = [];
@@ -585,6 +808,15 @@ function convertParagraph(paragraphValue: GoogleParagraph, context: ConversionCo
   }
   if (currentInline.length || result.length === 0) flush();
   return result;
+}
+
+function googleParagraphAlignment(value: string | undefined): ParagraphAlignment | undefined {
+  if (!value) return undefined;
+  if (value === "CENTER") return "center";
+  if (value === "END" || value === "RIGHT") return "right";
+  if (value === "JUSTIFIED" || value === "JUSTIFY") return "justify";
+  if (value === "START" || value === "LEFT") return "left";
+  return undefined;
 }
 
 function paragraphInlineContent(

@@ -80,11 +80,13 @@ export function restoreYouMindBrowserSession(value: unknown) {
 
 export function getYouMindConnection(request: Request) {
   const token = getSession(request)?.token;
+  const useConfiguredServerKey = Boolean(process.env.YOUMIND_IMPORT_API_KEY)
+    && process.env.NODE_ENV !== "development";
   return {
     available: true,
     connected: Boolean(token),
     accountName: token?.accountName ?? (token ? "YouMind workspace" : undefined),
-    mode: process.env.YOUMIND_IMPORT_API_KEY ? "server-key" as const : "api-key" as const,
+    mode: useConfiguredServerKey ? "server-key" as const : "api-key" as const,
     settingsUrl: "https://youmind.com/settings/api-keys"
   };
 }

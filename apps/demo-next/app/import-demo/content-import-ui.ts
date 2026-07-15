@@ -5,13 +5,14 @@ export type ImportSourceAnalysis = {
   importable: boolean;
   resourceType: "document" | "container" | "unsupported";
   resourceId?: string;
+  publicImportSupported?: boolean;
   resourceLabel: string;
   message: string;
 };
 
 const PROVIDER_HOSTS: Array<{ provider: ImportProvider; hosts: string[] }> = [
   { provider: "googledocs", hosts: ["docs.google.com"] },
-  { provider: "notion", hosts: ["notion.so", "notion.site"] },
+  { provider: "notion", hosts: ["notion.so", "notion.site", "notion.com"] },
   { provider: "feishu", hosts: ["feishu.cn", "larksuite.com", "larkoffice.com"] },
   { provider: "youmind", hosts: ["youmind.com"] }
 ];
@@ -53,11 +54,23 @@ export function analyzeImportSource(value: string): ImportSourceAnalysis | null 
   if (provider === "googledocs") {
     const importable = /\/document\/d\/[^/]+/i.test(url.pathname);
     return importable
-      ? { provider, importable: true, resourceType: "document", resourceLabel: "Google Docs 文档", message: "链接格式有效，可以检查授权并读取文档。" }
+      ? { provider, importable: true, publicImportSupported: true, resourceType: "document", resourceLabel: "Google Docs 文档", message: "链接格式有效，可以检查授权并读取文档。" }
       : { provider, importable: false, resourceType: "unsupported", resourceLabel: "Google Drive 链接", message: "当前只支持 Google Docs 文档链接，请打开具体文档后重新复制地址。" };
   }
 
   if (provider === "youmind") {
+    const publicShareId = url.pathname.match(/^\/s\/([A-Za-z0-9_-]{6,128})\/?$/)?.[1];
+    if (publicShareId) {
+      return {
+        provider,
+        importable: true,
+        publicImportSupported: true,
+        resourceType: "document",
+        resourceId: publicShareId,
+        resourceLabel: "YouMind 公开分享",
+        message: "链接有效，将先匿名读取公开内容；读取失败时再请求授权。"
+      };
+    }
     if (/\/boards?\//i.test(url.pathname)) {
       const boardId = url.pathname.match(/\/boards?\/([^/?#]+)/i)?.[1];
       return {
@@ -79,13 +92,27 @@ export function analyzeImportSource(value: string): ImportSourceAnalysis | null 
     const compactPath = url.pathname.replace(/-/g, "");
     const importable = /[0-9a-f]{32}/i.test(compactPath);
     return importable
-      ? { provider, importable: true, resourceType: "document", resourceLabel: "Notion 页面", message: "链接格式有效，可以检查授权并读取页面。" }
+      ? {
+          provider,
+          importable: true,
+          publicImportSupported: true,
+          resourceType: "document",
+          resourceLabel: "Notion 公开页面",
+          message: "链接有效，将先匿名读取公开内容；读取失败时再请求 Notion 授权。"
+        }
       : { provider, importable: false, resourceType: "unsupported", resourceLabel: "Notion 链接", message: "没有识别到 Notion 页面 ID，请打开具体页面后重新复制链接。" };
   }
 
-  const importable = /\/(docx|docs|wiki)\//i.test(url.pathname);
+  const importable = /\/(docx|wiki)\//i.test(url.pathname);
   return importable
-    ? { provider, importable: true, resourceType: "document", resourceLabel: "飞书文档", message: "链接格式有效，可以检查授权并读取文档。" }
+    ? {
+        provider,
+        importable: true,
+        publicImportSupported: true,
+        resourceType: "document",
+        resourceLabel: "飞书公开分享",
+        message: "链接有效，将使用只读应用身份读取外部公开内容。"
+      }
     : { provider, importable: false, resourceType: "unsupported", resourceLabel: "飞书链接", message: "当前只支持飞书文档或 Wiki 页面链接。" };
 }
 

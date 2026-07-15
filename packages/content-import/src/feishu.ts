@@ -156,7 +156,9 @@ export class FeishuConnector implements ContentConnector {
 
     try {
       const url = new URL(trimmed);
-      if (!/(^|\.)(feishu\.cn|larksuite\.com)$/.test(url.hostname)) throw new Error("host");
+      if (!/(^|\.)(feishu\.cn|larksuite\.com|larkoffice\.com)$/.test(url.hostname)) {
+        throw new Error("host");
+      }
       const match = url.pathname.match(/\/(docx|wiki)\/([A-Za-z0-9_-]+)/);
       if (!match) throw new Error("path");
       return {
@@ -213,6 +215,18 @@ export class FeishuConnector implements ContentConnector {
     return canonicalDocumentToDraftDoc(
       await this.fetchDocument(token, this.resolveDocument(urlOrId))
     );
+  }
+
+  /**
+   * Reads an internet-shared document with the identity of a self-built app.
+   *
+   * Feishu public links are not anonymous OpenAPI resources: the Docx APIs still
+   * require an access token. A tenant token is sufficient when the document's
+   * sharing policy grants internet link viewers read access.
+   */
+  async importPublicDocument(urlOrId: string): Promise<ContentImportResult> {
+    const token = await this.getTenantAccessToken();
+    return this.importDocument(token, urlOrId);
   }
 
   private async resolveWikiNode(
@@ -308,6 +322,45 @@ export class FeishuConnector implements ContentConnector {
       });
     }
     return payload.data ?? payload;
+  }
+
+  private async getTenantAccessToken(): Promise<ConnectorToken> {
+    const response = await this.fetchImpl(
+      `${this.apiBaseUrl}/open-apis/auth/v3/tenant_access_token/internal`,
+      {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app_id: this.config.clientId,
+          app_secret: this.config.clientSecret
+        })
+      }
+    );
+    const payload = (await response.json().catch(() => undefined)) as
+      | { code?: number; msg?: string; tenant_access_token?: string; expire?: number }
+      | undefined;
+    if (
+      !response.ok
+      || !payload
+      || (typeof payload.code === "number" && payload.code !== 0)
+      || typeof payload.tenant_access_token !== "string"
+    ) {
+      throw new ConnectorError({
+        provider: "feishu",
+        code: "authorization_failed",
+        message: payload?.msg || "飞书应用身份授权失败。",
+        status: response.status,
+        details: payload
+      });
+    }
+    return {
+      accessToken: payload.tenant_access_token,
+      tokenType: "bearer",
+      expiresAt: typeof payload.expire === "number"
+        ? new Date(Date.now() + payload.expire * 1000).toISOString()
+        : undefined,
+      metadata: { appIdentity: true }
+    };
   }
 
   private async apiRequest<T>(token: ConnectorToken, path: string): Promise<T> {

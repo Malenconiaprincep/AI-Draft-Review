@@ -15,10 +15,13 @@ import type {
 
 const DEFAULT_API_BASE_URL = "https://youmind.com/openapi/v1";
 const DEFAULT_SETTINGS_URL = "https://youmind.com/settings/api-keys";
+const DEFAULT_PUBLIC_SHARE_BASE_URL = "https://youmind.com";
+const MAX_PUBLIC_SHARE_HTML_LENGTH = 10 * 1024 * 1024;
 
 export type YouMindConnectorConfig = {
   apiBaseUrl?: string;
   settingsUrl?: string;
+  publicShareBaseUrl?: string;
   fetch?: FetchLike;
 };
 
@@ -37,11 +40,13 @@ export class YouMindConnector implements ContentConnector {
   private readonly fetchImpl: FetchLike;
   private readonly apiBaseUrl: string;
   private readonly settingsUrl: string;
+  private readonly publicShareBaseUrl: string;
 
   constructor(config: YouMindConnectorConfig = {}) {
     this.fetchImpl = config.fetch ?? fetch;
     this.apiBaseUrl = (config.apiBaseUrl ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
     this.settingsUrl = config.settingsUrl ?? DEFAULT_SETTINGS_URL;
+    this.publicShareBaseUrl = (config.publicShareBaseUrl ?? DEFAULT_PUBLIC_SHARE_BASE_URL).replace(/\/$/, "");
   }
 
   getAuthorizationUrl(state: string): string {
@@ -190,6 +195,55 @@ export class YouMindConnector implements ContentConnector {
     );
   }
 
+  async importPublicDocument(source: string): Promise<ContentImportResult> {
+    const shareId = parseYouMindPublicShareId(source);
+    if (!shareId) {
+      throw new ConnectorError({
+        provider: "youmind",
+        code: "invalid_source",
+        message: "这不是有效的 YouMind 公开分享链接。"
+      });
+    }
+
+    const sourceUrl = `https://youmind.com/s/${encodeURIComponent(shareId)}`;
+    const response = await this.fetchImpl(
+      `${this.publicShareBaseUrl}/s/${encodeURIComponent(shareId)}`,
+      { headers: { Accept: "text/html" } }
+    );
+    if (!response.ok) {
+      const code = errorCodeForStatus(response.status);
+      throw new ConnectorError({
+        provider: "youmind",
+        code,
+        message: "这个 YouMind 分享链接无法公开读取，需要连接 API Key 后重试。",
+        status: response.status,
+        retryable: code === "rate_limited" || response.status >= 500,
+        details: await readErrorBody(response)
+      });
+    }
+
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (!contentType.includes("text/html")) {
+      throw new ConnectorError({
+        provider: "youmind",
+        code: "invalid_provider_response",
+        message: "YouMind 公开分享页返回了无法识别的内容格式。",
+        details: { contentType }
+      });
+    }
+
+    const html = await response.text();
+    if (html.length > MAX_PUBLIC_SHARE_HTML_LENGTH) {
+      throw new ConnectorError({
+        provider: "youmind",
+        code: "invalid_provider_response",
+        message: "YouMind 公开分享页内容过大，无法安全解析。"
+      });
+    }
+
+    return canonicalDocumentToDraftDoc(parseYouMindPublicShareHtml(html, sourceUrl));
+  }
+
   private async apiRequest(token: ConnectorToken, endpoint: string, payload: JsonRecord): Promise<unknown> {
     const response = await this.fetchImpl(`${this.apiBaseUrl}/${endpoint}`, {
       method: "POST",
@@ -292,6 +346,124 @@ export function parseYouMindFileId(input: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function parseYouMindPublicShareId(input: string): string | undefined {
+  if (!isYouMindUrl(input)) return undefined;
+  try {
+    const url = new URL(input);
+    return url.pathname.match(/^\/s\/([A-Za-z0-9_-]{6,128})\/?$/)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function parseYouMindPublicShareHtml(html: string, sourceUrl: string): CanonicalDocument {
+  const flight = extractNextFlightStream(html);
+  const snip = extractYouMindPublicSnip(flight);
+  if (!snip) {
+    throw new ConnectorError({
+      provider: "youmind",
+      code: "access_denied",
+      message: "这个 YouMind 分享链接没有开放匿名读取，需要连接 API Key 后重试。",
+      status: 403
+    });
+  }
+
+  const visibility = readString(snip, ["visibility"]);
+  if (visibility && visibility !== "public") {
+    throw new ConnectorError({
+      provider: "youmind",
+      code: "access_denied",
+      message: "这篇 YouMind 文档不是公开文档，需要连接 API Key 后重试。",
+      status: 403
+    });
+  }
+
+  const id = readString(snip, ["id"]);
+  const content = asRecord(snip.content);
+  const markdown = resolveNextFlightText(content?.plain, flight);
+  if (!id || !markdown?.trim()) {
+    throw new ConnectorError({
+      provider: "youmind",
+      code: "invalid_provider_response",
+      message: "YouMind 公开分享页没有返回可识别的文档内容。"
+    });
+  }
+
+  const parsed = parseMarkdownToCanonical(markdown, "youmind");
+  return {
+    ref: { provider: "youmind", id, kind: readString(snip, ["type"]) ?? "file", url: sourceUrl },
+    title: readString(snip, ["title", "name"]) ?? "Untitled YouMind file",
+    revision: readString(snip, ["updated_at", "updatedAt"]),
+    lastEditedAt: readString(snip, ["updated_at", "updatedAt"]),
+    content: adaptYouMindCanonicalNodes(parsed.content),
+    assets: parsed.assets,
+    warnings: parsed.warnings
+  };
+}
+
+function extractNextFlightStream(html: string): string {
+  const chunks: string[] = [];
+  const pattern = /self\.__next_f\.push\(\[1,("(?:\\.|[^"\\])*")\]\)/g;
+  for (const match of html.matchAll(pattern)) {
+    try {
+      chunks.push(JSON.parse(match[1]) as string);
+    } catch {
+      // Ignore malformed hydration chunks and continue looking for the document payload.
+    }
+  }
+  return chunks.join("");
+}
+
+function extractYouMindPublicSnip(flight: string): JsonRecord | undefined {
+  const marker = '"snip":';
+  const markerIndex = flight.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  const objectStart = flight.indexOf("{", markerIndex + marker.length);
+  if (objectStart < 0) return undefined;
+  const serialized = balancedJsonObject(flight, objectStart);
+  if (!serialized) return undefined;
+  try {
+    return asRecord(JSON.parse(serialized));
+  } catch {
+    return undefined;
+  }
+}
+
+function balancedJsonObject(value: string, start: number): string | undefined {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') quoted = false;
+      continue;
+    }
+    if (character === '"') quoted = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return value.slice(start, index + 1);
+  }
+  return undefined;
+}
+
+function resolveNextFlightText(value: unknown, flight: string): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  if (!/^\$[0-9a-f]+$/i.test(value)) return value;
+  const recordId = value.slice(1);
+  const marker = new RegExp(`${recordId}:T([0-9a-f]+),`, "i").exec(flight);
+  if (!marker) return undefined;
+  const byteLength = Number.parseInt(marker[1], 16);
+  if (!Number.isFinite(byteLength) || byteLength < 0 || byteLength > MAX_PUBLIC_SHARE_HTML_LENGTH) {
+    return undefined;
+  }
+  const start = (marker.index ?? 0) + marker[0].length;
+  const bytes = new TextEncoder().encode(flight.slice(start));
+  if (bytes.length < byteLength) return undefined;
+  return new TextDecoder().decode(bytes.slice(0, byteLength));
 }
 
 function assertYouMindRef(ref: ExternalDocumentRef) {

@@ -105,9 +105,9 @@ test("normalizes tabs, rich text, lists, tables and inline images", () => {
           },
           body: {
             content: [
-              { paragraph: { paragraphStyle: { namedStyleType: "HEADING_1" }, elements: [{ textRun: { content: "Plan\n", textStyle: { bold: true } } }] } },
-              { paragraph: { bullet: { listId: "list" }, elements: [{ textRun: { content: "First\n" } }] } },
-              { paragraph: { bullet: { listId: "list" }, elements: [{ textRun: { content: "Second\n" } }] } },
+              { paragraph: { paragraphStyle: { namedStyleType: "HEADING_1", alignment: "CENTER" }, elements: [{ textRun: { content: "Plan\n", textStyle: { bold: true } } }] } },
+              { paragraph: { paragraphStyle: { alignment: "END" }, bullet: { listId: "list" }, elements: [{ textRun: { content: "First\n" } }] } },
+              { paragraph: { paragraphStyle: { alignment: "END" }, bullet: { listId: "list" }, elements: [{ textRun: { content: "Second\n" } }] } },
               { paragraph: { elements: [{ textRun: { content: "Before " } }, { inlineObjectElement: { inlineObjectId: "image" } }, { textRun: { content: " after\n" } }] } },
               { table: { tableRows: [{ tableCells: [
                 { content: [{ paragraph: { elements: [{ textRun: { content: "A\n" } }] } }] },
@@ -131,7 +131,9 @@ test("normalizes tabs, rich text, lists, tables and inline images", () => {
   assert.equal(normalized.revision, "rev-7");
   assert.equal(normalized.lastEditedAt, "2026-07-13T12:00:00.000Z");
   assert.equal(normalized.content[0]?.type, "heading");
+  assert.equal(normalized.content[0]?.attrs?.textAlign, "center");
   assert.equal(normalized.content[1]?.type, "orderedList");
+  assert.equal(normalized.content[1]?.content?.[0]?.content?.[0]?.attrs?.textAlign, "right");
   assert.equal(normalized.content.some((node) => node.type === "image"), true);
   assert.equal(normalized.content.at(-1)?.type, "table");
   assert.equal(normalized.assets[0]?.provider, "googledocs");
@@ -244,6 +246,65 @@ test("exports selected Docs as Markdown and parses it into a DraftDoc", async ()
   const exportCall = calls.find((url) => url.includes("/export?"));
   assert.equal(new URL(exportCall ?? "http://invalid").searchParams.get("mimeType"), "text/markdown");
   assert.equal(calls.some((url) => url.includes("docs.googleapis.com")), false);
+});
+
+test("imports a public Google Doc as Markdown without an access token", async () => {
+  const requestedUrls: string[] = [];
+  const authorizationHeaders: Array<string | null> = [];
+  const connector = new GoogleDocsConnector({
+    clientId: "client",
+    publicDocsBaseUrl: "https://docs.example",
+    fetch: (async (input, init) => {
+      const requestedUrl = String(input);
+      requestedUrls.push(requestedUrl);
+      authorizationHeaders.push(new Headers(init?.headers).get("authorization"));
+      if (new URL(requestedUrl).searchParams.get("format") === "html") {
+        return new Response([
+          "<style>.left{text-align:left}.right{text-align:right}</style>",
+          '<p class="left">公开文档</p>',
+          '<p class="right">无需授权即可读取。<br>右对齐第二行</p>'
+        ].join(""), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+      return new Response("# 公开文档\n\n无需授权即可读取。  \n右对齐第二行", {
+        headers: {
+          "Content-Type": "text/x-markdown; charset=utf-8",
+          "Content-Disposition": "attachment; filename*=UTF-8''%E5%85%AC%E5%BC%80%E6%96%87%E6%A1%A3.md"
+        }
+      });
+    }) as FetchLike
+  });
+
+  const result = await connector.importPublicDocument(
+    `https://docs.google.com/document/d/${documentId}/edit?tab=t.0`
+  );
+
+  assert.equal(requestedUrls.length, 2);
+  assert.equal(new URL(requestedUrls[0]).pathname, `/document/d/${documentId}/export`);
+  assert.deepEqual(requestedUrls.map((url) => new URL(url).searchParams.get("format")), ["md", "html"]);
+  assert.deepEqual(authorizationHeaders, [null, null]);
+  assert.equal(result.title, "公开文档");
+  assert.equal(result.doc.content?.[0]?.type, "heading");
+  assert.equal(result.doc.content?.[0]?.attrs?.textAlign, "left");
+  assert.equal(result.doc.content?.[1]?.attrs?.textAlign, "right");
+  assert.equal(result.sourceRevision, undefined);
+});
+
+test("requires authorization when anonymous Google Docs export returns HTML", async () => {
+  const connector = new GoogleDocsConnector({
+    clientId: "client",
+    fetch: (async () => new Response("<html>Sign in</html>", {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    })) as FetchLike
+  });
+
+  await assert.rejects(
+    connector.importPublicDocument(documentId),
+    (error: unknown) => Boolean(
+      error instanceof Error
+      && "code" in error
+      && error.code === "access_denied"
+    )
+  );
 });
 
 test("falls back to Docs API when Markdown export is unavailable", async () => {
