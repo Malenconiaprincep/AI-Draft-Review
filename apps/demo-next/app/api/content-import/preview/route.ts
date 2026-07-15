@@ -21,7 +21,8 @@ import {
 import {
   callNotionMcpFetch,
   getNotionMcpConnection,
-  isNotionBrowserSessionPersistenceAvailable
+  isBrowserSessionPersistenceAvailable,
+  persistNotionMcpSession
 } from "../../../../lib/notion-mcp-demo";
 import { localizeImportAssets } from "../../../../lib/local-import-assets";
 import { callFeishuMcpFetch } from "../../../../lib/feishu-mcp-demo";
@@ -66,7 +67,7 @@ export function GET(request: Request) {
         available: true,
         connected: notionMcp.connected,
         accountName: notionMcp.accountName,
-        browserSessionPersistenceAvailable: isNotionBrowserSessionPersistenceAvailable()
+        browserSessionPersistenceAvailable: isBrowserSessionPersistenceAvailable()
       },
       feishu: {
         transport: "mcp",
@@ -82,9 +83,13 @@ export function GET(request: Request) {
         connected: youmind.connected,
         accountName: youmind.accountName,
         mode: youmind.mode,
-        settingsUrl: youmind.settingsUrl
+        settingsUrl: youmind.settingsUrl,
+        browserSessionPersistenceAvailable: isBrowserSessionPersistenceAvailable()
       },
-      googledocs: googleDocs
+      googledocs: {
+        ...googleDocs,
+        browserSessionPersistenceAvailable: isBrowserSessionPersistenceAvailable()
+      }
     }
   });
 }
@@ -146,7 +151,7 @@ export async function POST(request: Request) {
       const result = await localizeImportAssets(
         notionMcpFetchResultToImport(notionMcpResult, source)
       );
-      return importResponse(mode, result, "mcp");
+      return persistNotionMcpSession(importResponse(mode, result, "mcp"), request);
     }
 
     const token = fixture

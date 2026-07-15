@@ -1,18 +1,27 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { OAuthClientProvider, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type {
   OAuthClientInformationMixed,
   OAuthClientMetadata,
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { isNotionBrowserSessionPersistenceAvailable } from "./notion-browser-persistence";
+import { isBrowserSessionPersistenceAvailable } from "./browser-session-persistence.ts";
+import {
+  decodeNotionMcpSessionCookie,
+  encodeNotionMcpSessionCookie,
+  mergeNotionMcpTokens,
+  NOTION_MCP_STATE_COOKIE,
+  type PersistedNotionMcpSession
+} from "./notion-mcp-session-cookie.ts";
 
-export { isNotionBrowserSessionPersistenceAvailable } from "./notion-browser-persistence";
+export { isBrowserSessionPersistenceAvailable } from "./browser-session-persistence.ts";
 
 export const NOTION_MCP_SESSION_COOKIE = "tutti_notion_mcp_session";
 export const NOTION_MCP_SERVER_URL = process.env.NOTION_MCP_SERVER_URL || "https://mcp.notion.com/mcp";
+export { NOTION_MCP_STATE_COOKIE };
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -55,7 +64,11 @@ const sessions = globalStore.__tuttiNotionMcpSessions ?? new Map<string, NotionM
 globalStore.__tuttiNotionMcpSessions = sessions;
 
 class NotionMcpOAuthProvider implements OAuthClientProvider {
-  constructor(private readonly session: NotionMcpSession) {}
+  private readonly session: NotionMcpSession;
+
+  constructor(session: NotionMcpSession) {
+    this.session = session;
+  }
 
   get redirectUrl() {
     return this.session.redirectUrl;
@@ -88,7 +101,7 @@ class NotionMcpOAuthProvider implements OAuthClientProvider {
   }
 
   saveTokens(tokens: OAuthTokens) {
-    this.session.tokens = tokens;
+    this.session.tokens = mergeNotionMcpTokens(this.session.tokens, tokens);
     this.session.expiresAt = Date.now() + SESSION_TTL_MS;
   }
 
@@ -134,7 +147,11 @@ export async function beginNotionMcpAuthorization(request: Request) {
       throw new Error("Notion MCP 未要求授权，无法启动 OAuth 流程。");
     } catch (error) {
       if (error instanceof UnauthorizedError && session.authorizationUrl) {
-        return { sessionId: id, authorizationUrl: session.authorizationUrl };
+        return {
+          sessionId: id,
+          sessionState: encodeNotionMcpSessionCookie(session),
+          authorizationUrl: session.authorizationUrl
+        };
       }
       lastError = error;
       if (!isRetryableNetworkError(error) || attempt === 2) break;
@@ -242,7 +259,44 @@ export function restoreNotionMcpDevSession(request: Request, value: unknown) {
     accountId: snapshot.accountId
   };
   sessions.set(id, session);
-  return { sessionId: id, accountName: session.accountName, accountId: session.accountId };
+  return {
+    sessionId: id,
+    sessionState: encodeNotionMcpSessionCookie(session),
+    accountName: session.accountName,
+    accountId: session.accountId
+  };
+}
+
+type CookieResponse = {
+  cookies: {
+    set(name: string, value: string, options: {
+      httpOnly: boolean;
+      sameSite: "lax";
+      secure: boolean;
+      path: string;
+      maxAge: number;
+    }): unknown;
+  };
+};
+
+export function persistNotionMcpSession<T extends CookieResponse>(
+  response: T,
+  request: Request,
+  initial?: { sessionId: string; sessionState: string }
+): T {
+  const sessionId = initial?.sessionId ?? readCookie(request, NOTION_MCP_SESSION_COOKIE);
+  const sessionState = initial?.sessionState ?? sessionStateForRequest(request);
+  if (!sessionId || !sessionState) return response;
+  const options = {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: SESSION_TTL_MS / 1000
+  };
+  response.cookies.set(NOTION_MCP_SESSION_COOKIE, sessionId, options);
+  response.cookies.set(NOTION_MCP_STATE_COOKIE, sessionState, options);
+  return response;
 }
 
 function createClient() {
@@ -277,7 +331,39 @@ async function withMcpClientRetry<T>(
 function getSession(request: Request): NotionMcpSession | undefined {
   pruneExpiredSessions();
   const id = readCookie(request, NOTION_MCP_SESSION_COOKIE);
-  return id ? sessions.get(id) : undefined;
+  if (!id) return undefined;
+  const current = sessions.get(id);
+  if (current?.tokens?.access_token) return current;
+
+  const restored = restoreSessionFromRequest(request, id);
+  if (restored?.tokens?.access_token || !current) {
+    if (restored) sessions.set(id, restored);
+    return restored;
+  }
+  return current;
+}
+
+function restoreSessionFromRequest(request: Request, id: string): NotionMcpSession | undefined {
+  const value = readCookie(request, NOTION_MCP_STATE_COOKIE);
+  if (!value) return undefined;
+  const restored = decodeNotionMcpSessionCookie(
+    value,
+    new URL("/api/connectors/notion/callback", request.url).toString()
+  );
+  return restored?.id === id ? restored : undefined;
+}
+
+function sessionStateForRequest(request: Request): string | undefined {
+  const session = requireSession(request);
+  try {
+    return encodeNotionMcpSessionCookie(session as PersistedNotionMcpSession);
+  } catch (error) {
+    if (error instanceof Error && error.message === "notion_session_cookie_too_large") {
+      console.warn("Notion MCP session is too large for durable cookie persistence.");
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 function requireSession(request: Request): NotionMcpSession {
@@ -300,7 +386,7 @@ function pruneExpiredSessions() {
 }
 
 function assertBrowserSessionPersistenceAvailable() {
-  if (!isNotionBrowserSessionPersistenceAvailable()) {
+  if (!isBrowserSessionPersistenceAvailable()) {
     throw new Error("browser_session_persistence_disabled");
   }
 }

@@ -128,9 +128,9 @@ POST /api/content-import/preview
 ## 授权与安全边界
 
 - 个人 Google 账号即可授权，不要求 Google Workspace 管理员或服务账号。
-- Google access token 必须传给 Picker，因此会短暂存在于当前页面内存；页面不会写入 Local Storage、URL 或日志。
+- Google access token 必须传给 Picker，因此会短暂存在于当前页面内存。默认不会写入 Local Storage、URL 或日志；设置 `BROWSER_SESSION_PERSISTENCE=true` 后可显示默认关闭的实验开关，用户手动开启时会写入当前浏览器 Local Storage。
 - 选中后 access token 通过同源 HTTPS POST 交给 Tutti 服务端，浏览器随后只使用 HttpOnly Session Cookie。
-- GIS token model 不返回 refresh token。当前会话最长 1 小时，过期后用户重新打开 Picker 即可。
+- GIS token model 不返回 refresh token。即使开启实验持久化，当前 Token 最长约 1 小时，过期后用户仍需重新打开 Picker。
 - 服务端仅允许导入当前 Picker 回调返回的文档 ID，不能靠修改文本框扩大访问范围。
 - API Key 会出现在客户端代码中，这是 Picker 的正常用法；必须使用 HTTP referrer 和 API restriction 限制滥用。
 - 生产环境仍需隐私政策、域名/品牌配置，并遵守 Google API Services User Data Policy；但 `drive.file` 避免了 restricted Drive Scope 的安全评估路径。

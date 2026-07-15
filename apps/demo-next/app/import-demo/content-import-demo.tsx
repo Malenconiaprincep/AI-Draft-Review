@@ -12,6 +12,7 @@ import {
 import { analyzeImportSource, detectImportProvider, type ImportProvider } from "./content-import-ui";
 
 type Provider = ImportProvider;
+type BrowserPersistableProvider = Exclude<Provider, "feishu">;
 
 type DemoSettings = {
   liveAvailable: Record<Provider, boolean>;
@@ -38,12 +39,14 @@ type DemoSettings = {
       accountName?: string;
       mode: "api-key" | "server-key";
       settingsUrl: string;
+      browserSessionPersistenceAvailable: boolean;
     };
     googledocs: {
       available: boolean;
       connected: boolean;
       accountName?: string;
       mode: "picker";
+      browserSessionPersistenceAvailable: boolean;
     };
   };
 };
@@ -138,14 +141,50 @@ const DEFAULT_SETTINGS: DemoSettings = {
       available: true,
       connected: false,
       mode: "api-key",
-      settingsUrl: "https://youmind.com/settings/api-keys"
+      settingsUrl: "https://youmind.com/settings/api-keys",
+      browserSessionPersistenceAvailable: false
     },
-    googledocs: { available: false, connected: false, mode: "picker" }
+    googledocs: {
+      available: false,
+      connected: false,
+      mode: "picker",
+      browserSessionPersistenceAvailable: false
+    }
   }
 };
 
-const NOTION_BROWSER_PERSISTENCE_PREFERENCE = "tutti_notion_browser_persist_enabled";
-const NOTION_BROWSER_SESSION_STORAGE = "tutti_notion_browser_session";
+const BROWSER_PERSISTABLE_PROVIDERS: BrowserPersistableProvider[] = ["notion", "youmind", "googledocs"];
+const BROWSER_PERSISTENCE_CONFIG: Record<BrowserPersistableProvider, {
+  endpoint: string;
+  preferenceKey: string;
+  sessionKey: string;
+}> = {
+  notion: {
+    endpoint: "/api/connectors/notion/dev-session",
+    preferenceKey: "tutti_notion_browser_persist_enabled",
+    sessionKey: "tutti_notion_browser_session"
+  },
+  youmind: {
+    endpoint: "/api/connectors/youmind/browser-session",
+    preferenceKey: "tutti_youmind_browser_persist_enabled",
+    sessionKey: "tutti_youmind_browser_session"
+  },
+  googledocs: {
+    endpoint: "/api/connectors/google-docs/browser-session",
+    preferenceKey: "tutti_google_docs_browser_persist_enabled",
+    sessionKey: "tutti_google_docs_browser_session"
+  }
+};
+const DEFAULT_BROWSER_PERSISTENCE_ENABLED: Record<BrowserPersistableProvider, boolean> = {
+  notion: false,
+  youmind: false,
+  googledocs: false
+};
+const DEFAULT_BROWSER_PERSISTENCE_MESSAGES: Record<BrowserPersistableProvider, string> = {
+  notion: "未在此浏览器保存 Notion 会话。",
+  youmind: "未在此浏览器保存 YouMind 会话。",
+  googledocs: "未在此浏览器保存 Google Docs 会话。"
+};
 
 export function ContentImportDemo() {
   const [provider, setProvider] = useState<Provider>("notion");
@@ -158,10 +197,14 @@ export function ContentImportDemo() {
   const [notionPages, setNotionPages] = useState<NotionPageSummary[]>([]);
   const [notionPagesStatus, setNotionPagesStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [notionPagesMessage, setNotionPagesMessage] = useState("点击“获取页面”后才会请求 Notion MCP。");
-  const [notionBrowserPersistenceEnabled, setNotionBrowserPersistenceEnabled] = useState(false);
-  const [notionBrowserPersistenceHydrated, setNotionBrowserPersistenceHydrated] = useState(false);
-  const [notionBrowserPersistenceMessage, setNotionBrowserPersistenceMessage] = useState("未在此浏览器保存 Notion 会话。");
-  const notionBrowserRestoreAttempted = useRef(false);
+  const [browserPersistenceEnabled, setBrowserPersistenceEnabled] = useState(DEFAULT_BROWSER_PERSISTENCE_ENABLED);
+  const [browserPersistenceHydrated, setBrowserPersistenceHydrated] = useState(false);
+  const [browserPersistenceMessages, setBrowserPersistenceMessages] = useState(DEFAULT_BROWSER_PERSISTENCE_MESSAGES);
+  const browserRestoreAttempted = useRef<Record<BrowserPersistableProvider, boolean>>({
+    notion: false,
+    youmind: false,
+    googledocs: false
+  });
   const [feishuQuery, setFeishuQuery] = useState("最近修改的文档");
   const [feishuDocuments, setFeishuDocuments] = useState<FeishuDocumentSummary[]>([]);
   const [feishuDocumentsStatus, setFeishuDocumentsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -227,10 +270,12 @@ export function ContentImportDemo() {
   }, []);
 
   useEffect(() => {
-    setNotionBrowserPersistenceEnabled(
-      window.localStorage.getItem(NOTION_BROWSER_PERSISTENCE_PREFERENCE) === "1"
-    );
-    setNotionBrowserPersistenceHydrated(true);
+    setBrowserPersistenceEnabled({
+      notion: window.localStorage.getItem(BROWSER_PERSISTENCE_CONFIG.notion.preferenceKey) === "1",
+      youmind: window.localStorage.getItem(BROWSER_PERSISTENCE_CONFIG.youmind.preferenceKey) === "1",
+      googledocs: window.localStorage.getItem(BROWSER_PERSISTENCE_CONFIG.googledocs.preferenceKey) === "1"
+    });
+    setBrowserPersistenceHydrated(true);
   }, []);
 
   useEffect(() => {
@@ -274,55 +319,78 @@ export function ContentImportDemo() {
   }, [workspaceSearchExpanded]);
 
   useEffect(() => {
-    if (
-      !notionBrowserPersistenceHydrated
-      || !settings.connections.notion.browserSessionPersistenceAvailable
-      || !notionBrowserPersistenceEnabled
-    ) return;
+    if (!browserPersistenceHydrated) return;
 
     let cancelled = false;
-    const syncDevSession = async () => {
-      if (settings.connections.notion.connected) {
-        const result = await fetch("/api/connectors/notion/dev-session", { cache: "no-store" });
-        if (!result.ok) return;
-        const snapshot = await result.json();
-        window.localStorage.setItem(NOTION_BROWSER_SESSION_STORAGE, JSON.stringify(snapshot));
-        if (!cancelled) setNotionBrowserPersistenceMessage("Notion 会话已保存到此浏览器，刷新后会自动恢复。");
-        return;
+    const setProviderMessage = (providerName: BrowserPersistableProvider, nextMessage: string) => {
+      if (cancelled) return;
+      setBrowserPersistenceMessages((current) => ({
+        ...current,
+        [providerName]: nextMessage
+      }));
+    };
+    const syncBrowserSessions = async () => {
+      const restoredProviders: BrowserPersistableProvider[] = [];
+      for (const providerName of BROWSER_PERSISTABLE_PROVIDERS) {
+        const connection = settings.connections[providerName];
+        if (!connection.browserSessionPersistenceAvailable || !browserPersistenceEnabled[providerName]) continue;
+        const persistence = BROWSER_PERSISTENCE_CONFIG[providerName];
+
+        if (connection.connected) {
+          const result = await fetch(persistence.endpoint, { cache: "no-store" });
+          if (!result.ok) continue;
+          const snapshot = await result.json();
+          window.localStorage.setItem(persistence.sessionKey, JSON.stringify(snapshot));
+          setProviderMessage(
+            providerName,
+            `${providerLabel(providerName)} 会话已保存到此浏览器，刷新后会自动恢复。`
+          );
+          continue;
+        }
+
+        if (browserRestoreAttempted.current[providerName]) continue;
+        const serialized = window.localStorage.getItem(persistence.sessionKey);
+        if (!serialized) continue;
+        browserRestoreAttempted.current[providerName] = true;
+        setProviderMessage(providerName, `正在从此浏览器恢复 ${providerLabel(providerName)} 会话…`);
+        const result = await fetch(persistence.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: serialized
+        });
+        if (!result.ok) {
+          window.localStorage.removeItem(persistence.sessionKey);
+          setProviderMessage(
+            providerName,
+            `浏览器中的 ${providerLabel(providerName)} 会话已失效，请重新绑定。`
+          );
+          continue;
+        }
+        restoredProviders.push(providerName);
+        setProviderMessage(providerName, `${providerLabel(providerName)} 会话已从此浏览器恢复。`);
       }
 
-      if (notionBrowserRestoreAttempted.current) return;
-      const serialized = window.localStorage.getItem(NOTION_BROWSER_SESSION_STORAGE);
-      if (!serialized) return;
-      notionBrowserRestoreAttempted.current = true;
-      setNotionBrowserPersistenceMessage("正在从此浏览器恢复 Notion 会话…");
-      const result = await fetch("/api/connectors/notion/dev-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: serialized
-      });
-      if (!result.ok) {
-        window.localStorage.removeItem(NOTION_BROWSER_SESSION_STORAGE);
-        if (!cancelled) setNotionBrowserPersistenceMessage("浏览器中的 Notion 会话已失效，请重新绑定。");
-        return;
-      }
+      if (!restoredProviders.length) return;
       const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
       if (!settingsResult.ok || cancelled) return;
       setSettings(await settingsResult.json() as DemoSettings);
-      setMessage("已从此浏览器恢复 Notion 会话，正在自动获取页面。");
-      setNotionBrowserPersistenceMessage("Notion 会话已从此浏览器恢复。");
+      setMessage(`已从此浏览器恢复 ${restoredProviders.map(providerLabel).join("、")} 会话。`);
     };
-    void syncDevSession().catch(() => {
-      if (!cancelled) setNotionBrowserPersistenceMessage("同步浏览器会话失败，请重新绑定 Notion。");
+    void syncBrowserSessions().catch(() => {
+      if (!cancelled) setMessage("同步浏览器会话失败，请重新绑定对应来源。");
     });
     return () => {
       cancelled = true;
     };
   }, [
-    notionBrowserPersistenceEnabled,
-    notionBrowserPersistenceHydrated,
+    browserPersistenceEnabled,
+    browserPersistenceHydrated,
     settings.connections.notion.connected,
-    settings.connections.notion.browserSessionPersistenceAvailable
+    settings.connections.notion.browserSessionPersistenceAvailable,
+    settings.connections.youmind.connected,
+    settings.connections.youmind.browserSessionPersistenceAvailable,
+    settings.connections.googledocs.connected,
+    settings.connections.googledocs.browserSessionPersistenceAvailable
   ]);
 
   useEffect(() => {
@@ -458,20 +526,34 @@ export function ContentImportDemo() {
     }
   }
 
-  const toggleNotionBrowserPersistence = (enabled: boolean) => {
-    setNotionBrowserPersistenceEnabled(enabled);
-    notionBrowserRestoreAttempted.current = false;
-    window.localStorage.setItem(NOTION_BROWSER_PERSISTENCE_PREFERENCE, enabled ? "1" : "0");
+  const toggleBrowserPersistence = (providerName: BrowserPersistableProvider, enabled: boolean) => {
+    const persistence = BROWSER_PERSISTENCE_CONFIG[providerName];
+    setBrowserPersistenceEnabled((current) => ({ ...current, [providerName]: enabled }));
+    browserRestoreAttempted.current[providerName] = false;
+    window.localStorage.setItem(persistence.preferenceKey, enabled ? "1" : "0");
     if (enabled) {
-      setNotionBrowserPersistenceMessage(
-        settings.connections.notion.connected
-          ? "正在把当前 Notion 会话保存到此浏览器…"
-          : "下次绑定 Notion 后会把会话保存到此浏览器。"
-      );
+      setBrowserPersistenceMessages((current) => ({
+        ...current,
+        [providerName]: settings.connections[providerName].connected
+          ? `正在把当前 ${providerLabel(providerName)} 会话保存到此浏览器…`
+          : `下次绑定 ${providerLabel(providerName)} 后会把会话保存到此浏览器。`
+      }));
     } else {
-      window.localStorage.removeItem(NOTION_BROWSER_SESSION_STORAGE);
-      setNotionBrowserPersistenceMessage("已关闭并清除此浏览器中的 Notion 会话。");
+      window.localStorage.removeItem(persistence.sessionKey);
+      setBrowserPersistenceMessages((current) => ({
+        ...current,
+        [providerName]: `已关闭并清除此浏览器中的 ${providerLabel(providerName)} 会话。`
+      }));
     }
+  };
+
+  const clearPersistedBrowserSession = (providerName: BrowserPersistableProvider) => {
+    window.localStorage.removeItem(BROWSER_PERSISTENCE_CONFIG[providerName].sessionKey);
+    browserRestoreAttempted.current[providerName] = true;
+    setBrowserPersistenceMessages((current) => ({
+      ...current,
+      [providerName]: `${providerLabel(providerName)} 已断开，浏览器会话已清除。`
+    }));
   };
 
   const loadFeishuDocuments = async (query = feishuQuery) => {
@@ -622,6 +704,7 @@ export function ContentImportDemo() {
 
   const disconnectGoogleDocs = async () => {
     await fetch("/api/connectors/google-docs/authorize", { method: "DELETE" });
+    clearPersistedBrowserSession("googledocs");
     const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
     setSettings(await settingsResult.json() as DemoSettings);
     setSelectedGoogleDocument(undefined);
@@ -687,6 +770,7 @@ export function ContentImportDemo() {
 
   const disconnectYouMind = async () => {
     await fetch("/api/connectors/youmind/authorize", { method: "DELETE" });
+    clearPersistedBrowserSession("youmind");
     const settingsResult = await fetch("/api/content-import/preview", { cache: "no-store" });
     setSettings(await settingsResult.json() as DemoSettings);
     setYouMindBoards([]);
@@ -1014,16 +1098,16 @@ export function ContentImportDemo() {
                 )}
               </div>
 
-              {provider === "notion" && notionConnection.browserSessionPersistenceAvailable ? (
+              {isBrowserPersistableProvider(provider) && settings.connections[provider].browserSessionPersistenceAvailable ? (
                 <label className="import-dev-persistence compact">
                   <input
                     type="checkbox"
-                    checked={notionBrowserPersistenceEnabled}
-                    onChange={(event) => toggleNotionBrowserPersistence(event.target.checked)}
+                    checked={browserPersistenceEnabled[provider]}
+                    onChange={(event) => toggleBrowserPersistence(provider, event.target.checked)}
                   />
                   <span>
-                    <strong>刷新后保持 Notion 绑定（实验）</strong>
-                    <small>{notionBrowserPersistenceMessage} Token 会保存在当前浏览器，请勿在公共设备开启。</small>
+                    <strong>刷新后保持 {providerLabel(provider)} 绑定（实验）</strong>
+                    <small>{browserPersistenceMessages[provider]} {browserPersistenceWarning(provider)}</small>
                   </span>
                 </label>
               ) : null}
@@ -1658,16 +1742,16 @@ export function ContentImportDemo() {
               </div>
             </section>
           )}
-          {provider === "notion" && notionConnection.browserSessionPersistenceAvailable ? (
+          {isBrowserPersistableProvider(provider) && settings.connections[provider].browserSessionPersistenceAvailable ? (
             <label className="import-dev-persistence">
               <input
                 type="checkbox"
-                checked={notionBrowserPersistenceEnabled}
-                onChange={(event) => toggleNotionBrowserPersistence(event.target.checked)}
+                checked={browserPersistenceEnabled[provider]}
+                onChange={(event) => toggleBrowserPersistence(provider, event.target.checked)}
               />
               <span>
-                <strong>刷新后保持 Notion 绑定（实验）</strong>
-                <small>{notionBrowserPersistenceMessage} Token 会写入当前浏览器 localStorage，请勿在公共设备开启。</small>
+                <strong>刷新后保持 {providerLabel(provider)} 绑定（实验）</strong>
+                <small>{browserPersistenceMessages[provider]} {browserPersistenceWarning(provider)}</small>
               </span>
             </label>
           ) : null}
@@ -1682,7 +1766,7 @@ export function ContentImportDemo() {
           <p className="import-token-note">
             {liveReady
               ? provider === "notion" && notionConnection.connected
-                ? notionConnection.browserSessionPersistenceAvailable && notionBrowserPersistenceEnabled
+                ? notionConnection.browserSessionPersistenceAvailable && browserPersistenceEnabled.notion
                   ? `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}；当前浏览器会保存会话以便刷新恢复。`
                   : `已通过官方 MCP 连接${notionConnection.accountName ? `工作区「${notionConnection.accountName}」` : " Notion"}。`
                 : provider === "feishu" && feishuConnection.connected
@@ -1692,9 +1776,13 @@ export function ContentImportDemo() {
                       ? "已通过用户专属自建应用取得 UAT；凭据仅保存在当前服务端会话。"
                       : "已通过飞书商店应用 OAuth 取得用户 UAT，导入时优先调用官方远程 MCP。"
                   : provider === "youmind" && youMindConnection.connected
-                    ? "已通过官方 OpenAPI 连接；API Key 仅保存在服务端会话内存中。"
+                    ? browserPersistenceEnabled.youmind
+                      ? "已通过官方 OpenAPI 连接；当前浏览器会保存 API Key 以便刷新恢复。"
+                      : "已通过官方 OpenAPI 连接；API Key 仅保存在服务端会话内存中。"
                     : provider === "googledocs" && googleDocsConnection.connected
-                      ? "已通过 Google Picker 授权选中文档；Tutti 不读取完整 Drive 列表。"
+                      ? browserPersistenceEnabled.googledocs
+                        ? "已通过 Google Picker 授权选中文档；当前浏览器会在 Token 有效期内尝试恢复。"
+                        : "已通过 Google Picker 授权选中文档；Tutti 不读取完整 Drive 列表。"
                     : `服务端已配置 ${providerLabel(provider)} Token。`
               : provider === "notion"
                 ? "尚未连接。点击 Connect Notion 将跳转官方 MCP OAuth；无需配置 Client ID/Secret。"
@@ -1849,6 +1937,16 @@ function providerLabel(provider: Provider): string {
       : provider === "youmind"
         ? "YouMind"
         : "Google Docs";
+}
+
+function isBrowserPersistableProvider(provider: Provider): provider is BrowserPersistableProvider {
+  return provider !== "feishu";
+}
+
+function browserPersistenceWarning(provider: BrowserPersistableProvider): string {
+  return provider === "googledocs"
+    ? "Access Token 会写入当前浏览器 localStorage；过期后需要重新授权，请勿在公共设备开启。"
+    : "Token 会写入当前浏览器 localStorage，请勿在公共设备开启。";
 }
 
 function providerConnectionLabel(provider: Provider, settings: DemoSettings): string {

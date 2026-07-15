@@ -15,6 +15,12 @@ type YouMindSession = {
   token: ConnectorToken;
 };
 
+export type YouMindBrowserSessionSnapshot = {
+  version: 1;
+  savedAt: string;
+  token: ConnectorToken;
+};
+
 const globalStore = globalThis as typeof globalThis & {
   __tuttiYouMindSessions?: Map<string, YouMindSession>;
 };
@@ -38,6 +44,38 @@ export async function connectYouMind(apiKey?: string) {
 export function disconnectYouMind(request: Request) {
   const id = readCookie(request, YOUMIND_SESSION_COOKIE);
   if (id) sessions.delete(id);
+}
+
+export function exportYouMindBrowserSession(request: Request): YouMindBrowserSessionSnapshot {
+  const session = getSession(request);
+  if (!session?.token.accessToken) throw new Error("not_connected");
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    token: session.token
+  };
+}
+
+export function restoreYouMindBrowserSession(value: unknown) {
+  const record = asRecord(value);
+  const tokenRecord = asRecord(record.token);
+  const accessToken = typeof tokenRecord.accessToken === "string"
+    ? tokenRecord.accessToken.trim()
+    : "";
+  if (record.version !== 1 || !accessToken || accessToken.length > 8192) {
+    throw new Error("invalid_browser_session");
+  }
+  const token = { ...tokenRecord, accessToken } as ConnectorToken;
+  const session: YouMindSession = {
+    id: randomUUID(),
+    token,
+    expiresAt: Date.now() + SESSION_TTL_MS
+  };
+  sessions.set(session.id, session);
+  return {
+    sessionId: session.id,
+    accountName: token.accountName
+  };
 }
 
 export function getYouMindConnection(request: Request) {
@@ -109,4 +147,8 @@ function readCookie(request: Request, name: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }

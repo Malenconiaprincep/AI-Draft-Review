@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getNotionMcpConnection,
+  persistNotionMcpSession,
   searchNotionMcpPages
 } from "../../../../../lib/notion-mcp-demo";
 
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   const query = new URL(request.url).searchParams.get("q")?.trim() || "最近修改的页面";
   try {
     const pages = await searchNotionMcpPages(request, query);
-    return NextResponse.json({ query, pages });
+    return persistNotionMcpSession(NextResponse.json({ query, pages }), request);
   } catch (error) {
     console.error("Notion MCP page search failed", error);
     return NextResponse.json(

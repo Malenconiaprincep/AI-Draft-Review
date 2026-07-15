@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
-  finishNotionMcpAuthorization
+  finishNotionMcpAuthorization,
+  persistNotionMcpSession
 } from "../../../../../lib/notion-mcp-demo";
 
 export const runtime = "nodejs";
@@ -12,7 +13,7 @@ export async function GET(request: Request) {
 
   try {
     await finishNotionMcpAuthorization(request);
-    return redirectToDemo(request, "connected");
+    return persistNotionMcpSession(redirectToDemo(request, "connected"), request);
   } catch (error) {
     if (error instanceof Error && error.message === "invalid_state") {
       return redirectToDemo(request, "invalid_state");

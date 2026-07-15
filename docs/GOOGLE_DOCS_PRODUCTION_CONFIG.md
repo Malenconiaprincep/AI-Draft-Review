@@ -214,7 +214,7 @@ flowchart LR
 
 安全边界：
 
-- 浏览器不会把 token 写入 URL 或 Local Storage。
+- 默认不会把 token 写入 URL 或 Local Storage；线上效果验证若启用 `BROWSER_SESSION_PERSISTENCE=true`，用户手动打开对应实验开关后会把短期 token 写入当前浏览器 Local Storage。
 - access token 通过同源 HTTPS POST 交给服务端短期内存会话。
 - 浏览器后续只保留随机 HttpOnly Session Cookie。
 - GIS token model 不返回 refresh token，access token 最长约 1 小时。
@@ -283,4 +283,3 @@ http://tutti.aikee.xyz
 7. 在 Search Console 验证新顶级域名。
 8. 重新提交 Google 品牌验证。
 9. 新域名审核和生产验证完成后，再删除旧 Origin 与旧 Referrer。
-

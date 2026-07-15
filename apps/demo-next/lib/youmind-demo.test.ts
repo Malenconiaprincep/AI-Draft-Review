@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getYouMindConnection, getYouMindToken, isYouMindArticleKind } from "./youmind-demo.ts";
+import {
+  exportYouMindBrowserSession,
+  getYouMindConnection,
+  getYouMindToken,
+  isYouMindArticleKind,
+  restoreYouMindBrowserSession,
+  YOUMIND_SESSION_COOKIE
+} from "./youmind-demo.ts";
 
 test("a configured server key still requires an explicit YouMind session", () => {
   const previousApiKey = process.env.YOUMIND_IMPORT_API_KEY;
@@ -28,4 +35,23 @@ test("identifies YouMind article files", () => {
   assert.equal(isYouMindArticleKind("document"), false);
   assert.equal(isYouMindArticleKind("video"), false);
   assert.equal(isYouMindArticleKind("group"), false);
+});
+
+test("restores a YouMind browser snapshot into a fresh server session", () => {
+  const restored = restoreYouMindBrowserSession({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    token: {
+      accessToken: "sk-ym-browser-test",
+      tokenType: "bearer",
+      accountName: "Browser test workspace"
+    }
+  });
+  const request = new Request("http://localhost/import-demo", {
+    headers: { cookie: `${YOUMIND_SESSION_COOKIE}=${restored.sessionId}` }
+  });
+
+  assert.equal(getYouMindConnection(request).connected, true);
+  assert.equal(getYouMindToken(request).accessToken, "sk-ym-browser-test");
+  assert.equal(exportYouMindBrowserSession(request).version, 1);
 });

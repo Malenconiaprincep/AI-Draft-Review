@@ -19,6 +19,12 @@ type GoogleDocsSession = {
   token: ConnectorToken;
 };
 
+export type GoogleDocsBrowserSessionSnapshot = {
+  version: 1;
+  savedAt: string;
+  token: ConnectorToken;
+};
+
 type GooglePickerLocalConfig = {
   clientId?: string;
   apiKey?: string;
@@ -73,6 +79,54 @@ export function connectGoogleDocs(input: {
 export function disconnectGoogleDocs(request: Request) {
   const id = readCookie(request, GOOGLE_DOCS_SESSION_COOKIE);
   if (id) sessions.delete(id);
+}
+
+export function exportGoogleDocsBrowserSession(request: Request): GoogleDocsBrowserSessionSnapshot {
+  const session = getSession(request);
+  if (!session?.token.accessToken) throw new Error("not_connected");
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    token: session.token
+  };
+}
+
+export function restoreGoogleDocsBrowserSession(value: unknown) {
+  const record = asRecord(value);
+  const tokenRecord = asRecord(record.token);
+  const metadata = asRecord(tokenRecord.metadata);
+  const accessToken = typeof tokenRecord.accessToken === "string"
+    ? tokenRecord.accessToken.trim()
+    : "";
+  const expiresAt = typeof tokenRecord.expiresAt === "string"
+    ? Date.parse(tokenRecord.expiresAt)
+    : Number.NaN;
+  if (
+    record.version !== 1
+    || !accessToken
+    || accessToken.length > 8192
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= Date.now()
+    || typeof metadata.selectedDocumentId !== "string"
+    || !metadata.selectedDocumentId.trim()
+  ) {
+    throw new Error("invalid_browser_session");
+  }
+  const token = {
+    ...tokenRecord,
+    accessToken,
+    metadata
+  } as ConnectorToken;
+  const session: GoogleDocsSession = {
+    id: randomUUID(),
+    token,
+    expiresAt: Math.min(Date.now() + SESSION_TTL_MS, expiresAt)
+  };
+  sessions.set(session.id, session);
+  return {
+    sessionId: session.id,
+    accountName: token.accountName
+  };
 }
 
 export function getGoogleDocsConnection(request: Request) {
@@ -181,4 +235,8 @@ function readCookie(request: Request, name: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }

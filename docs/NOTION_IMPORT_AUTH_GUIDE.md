@@ -53,15 +53,16 @@ POST /api/content-import/preview
 
 ## Token 安全边界
 
-当前 Demo 只把 MCP access/refresh token、动态注册客户端信息和 PKCE verifier 保存在本地 Node.js 进程内存中：
+当前 Demo 把 MCP access/refresh token、动态注册客户端信息和 PKCE verifier 保存在两处：
 
-- 浏览器只持有随机、HttpOnly、SameSite=Lax 的 Session ID。
+- 服务端进程内存保留热会话，减少同一实例上的重复恢复。
+- 浏览器同时持有 12 小时有效的 HttpOnly、SameSite=Lax 会话状态 Cookie；生产环境额外使用 Secure。Vercel 冷启动或请求切换实例后，服务端会从该 Cookie 恢复会话。
 - Token 不进入客户端 JavaScript、URL、日志或 Git。
-- Demo 会话最多保留 12 小时，服务重启后自动丢失。
+- Notion 返回刷新结果时，如果省略新的 refresh token，继续保留并使用现有 refresh token。
 
-可以显式设置 `NOTION_BROWSER_SESSION_PERSISTENCE=true`，让页面显示一个默认关闭的实验开关；只有用户手动勾选后，才会把 MCP Token 与动态客户端信息写入当前浏览器 localStorage，并在刷新后尝试恢复服务端会话。该模式仅用于线上效果验证，Token 会暴露给当前源下运行的浏览器脚本，不能在公共或共享设备启用。本地开发仍可使用兼容开关 `NOTION_DEV_LOCAL_STORAGE=true`。
+可以显式设置 `BROWSER_SESSION_PERSISTENCE=true`，让 Notion、YouMind 和 Google Docs 分别显示默认关闭的实验开关；只有用户手动勾选对应来源后，才会把其凭据写入当前浏览器 localStorage，并在刷新后尝试恢复服务端会话。该模式仅用于线上效果验证，Token 会暴露给当前源下运行的浏览器脚本，不能在公共或共享设备启用。旧的 `NOTION_BROWSER_SESSION_PERSISTENCE=true` 与本地 `NOTION_DEV_LOCAL_STORAGE=true` 仍作为兼容配置。
 
-生产环境必须改成服务端加密持久化，并关联 Tutti 用户、Notion 工作区、动态 MCP Client 和 Token 版本；还需要支持刷新 Token 原子轮换、断开连接、撤销和审计。
+当前 HttpOnly Cookie 方案用于无用户系统的 Demo 部署。正式多用户产品必须改成服务端加密持久化，并关联 Tutti 用户、Notion 工作区、动态 MCP Client 和 Token 版本；还需要支持刷新 Token 原子轮换、断开连接、撤销和审计。
 
 ## Internal connection 备用方式
 

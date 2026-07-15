@@ -3,11 +3,13 @@ import test from "node:test";
 import {
   connectGoogleDocs,
   disconnectGoogleDocs,
+  exportGoogleDocsBrowserSession,
   getGoogleDocsConnection,
   getGoogleDocsPickerConfig,
   getGoogleDocsToken,
   GOOGLE_DOCS_SESSION_COOKIE,
-  GOOGLE_DOCS_PICKER_SCOPE
+  GOOGLE_DOCS_PICKER_SCOPE,
+  restoreGoogleDocsBrowserSession
 } from "./google-docs-demo.ts";
 
 const documentId = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
@@ -49,6 +51,42 @@ test("stores only the Google Picker token and selected document in a short serve
     restoreEnv("GOOGLE_PICKER_API_KEY", original.apiKey);
     restoreEnv("GOOGLE_CLOUD_PROJECT_NUMBER", original.projectNumber);
   }
+});
+
+test("restores an unexpired Google Picker snapshot into a fresh server session", async () => {
+  const restored = restoreGoogleDocsBrowserSession({
+    version: 1,
+    savedAt: new Date().toISOString(),
+    token: {
+      accessToken: "google-browser-test-token",
+      tokenType: "bearer",
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      accountName: "Google account",
+      metadata: {
+        scope: GOOGLE_DOCS_PICKER_SCOPE,
+        selectedDocumentId: documentId,
+        authorizationMode: "picker"
+      }
+    }
+  });
+  const request = new Request("http://localhost/import-demo", {
+    headers: { cookie: `${GOOGLE_DOCS_SESSION_COOKIE}=${restored.sessionId}` }
+  });
+
+  assert.equal(getGoogleDocsConnection(request).connected, true);
+  assert.equal((await getGoogleDocsToken(request)).metadata?.selectedDocumentId, documentId);
+  assert.equal(exportGoogleDocsBrowserSession(request).version, 1);
+});
+
+test("rejects an expired Google Picker browser snapshot", () => {
+  assert.throws(() => restoreGoogleDocsBrowserSession({
+    version: 1,
+    token: {
+      accessToken: "expired-token",
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+      metadata: { selectedDocumentId: documentId }
+    }
+  }), /invalid_browser_session/);
 });
 
 function restoreEnv(name: string, value: string | undefined) {

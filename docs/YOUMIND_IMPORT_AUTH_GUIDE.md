@@ -99,7 +99,7 @@ const result = await importConnectedDocument({
 - Demo 的内存 Session 仅用于本地验证，进程重启后会丢失，最长保留 12 小时。
 - 正式环境应将 API Key 与 Tutti user id 关联，并使用 KMS/envelope encryption 加密保存。
 - 提供断开连接、Key 轮换、审计和撤销入口；日志与错误信息必须脱敏。
-- API Key 不应写入 localStorage、前端状态持久化、URL、分析事件或客户端日志。
+- 正式环境的 API Key 不应写入 localStorage、URL、分析事件或客户端日志。线上效果验证可通过 `BROWSER_SESSION_PERSISTENCE=true` 暴露默认关闭的实验开关；用户手动开启后会写入当前浏览器 localStorage，只能在个人测试设备使用。
 - 对外部素材继续执行大小、MIME、重定向、DNS/IP 与超时校验，再转存到 Tutti 对象存储。
 - 当前导入是用户主动的一次性复制；若增加自动同步，应保存 source revision 并处理重复导入和冲突。
 
