@@ -2562,6 +2562,25 @@ button:disabled {
   line-height: 1.25;
 }
 
+.import-preview-editor .ProseMirror ul,
+.import-preview-editor .ProseMirror ol {
+  margin: 12px 0;
+  padding-left: 1.6em;
+}
+
+.import-preview-editor .ProseMirror li {
+  margin: 4px 0;
+}
+
+.import-preview-editor .ProseMirror li > p {
+  margin: 0;
+}
+
+.import-preview-editor .ProseMirror li > ul,
+.import-preview-editor .ProseMirror li > ol {
+  margin: 4px 0;
+}
+
 .import-preview-editor .ProseMirror blockquote {
   margin: 18px 0;
   border-left: 3px solid var(--brand);

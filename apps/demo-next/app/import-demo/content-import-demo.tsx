@@ -114,6 +114,7 @@ type YouMindFileSummary = {
   url?: string;
   kind: string;
   lastEditedAt?: string;
+  boardName?: string;
 };
 
 type WorkspaceDocument = {
@@ -614,6 +615,15 @@ export function ContentImportDemo() {
     }
   };
 
+  const fetchYouMindFiles = async (boardId: string, query = "") => {
+    const params = new URLSearchParams({ boardId });
+    if (query.trim()) params.set("q", query.trim());
+    const result = await fetch(`/api/connectors/youmind/files?${params}`, { cache: "no-store" });
+    const payload = await result.json() as { files?: YouMindFileSummary[]; error?: string };
+    if (!result.ok) throw new Error(payload.error || `文件列表请求失败：${result.status}`);
+    return payload.files ?? [];
+  };
+
   const loadYouMindFiles = async (boardId = youMindBoardId, query = youMindQuery) => {
     if (!boardId) {
       setYouMindFilesStatus("error");
@@ -623,12 +633,7 @@ export function ContentImportDemo() {
     setYouMindFilesStatus("loading");
     setYouMindFilesMessage("正在通过 YouMind OpenAPI 读取文件…");
     try {
-      const params = new URLSearchParams({ boardId });
-      if (query.trim()) params.set("q", query.trim());
-      const result = await fetch(`/api/connectors/youmind/files?${params}`, { cache: "no-store" });
-      const payload = await result.json() as { files?: YouMindFileSummary[]; error?: string };
-      if (!result.ok) throw new Error(payload.error || `文件列表请求失败：${result.status}`);
-      const files = payload.files ?? [];
+      const files = await fetchYouMindFiles(boardId, query);
       setYouMindFiles(files);
       setYouMindFilesStatus("ready");
       setYouMindFilesMessage(files.length ? `找到 ${files.length} 个 article 文档。` : "这个 Board 中没有匹配的 article 文档。");
@@ -728,17 +733,49 @@ export function ContentImportDemo() {
         ? youMindBoardId
         : boards[0]?.id ?? "";
       setYouMindBoardId(nextBoardId);
-      if (nextBoardId) await loadYouMindFiles(nextBoardId, "");
-      else {
+      if (boards.length) {
+        const boardResults = await Promise.allSettled(
+          boards.map((board) => fetchYouMindFiles(board.id))
+        );
+        const filesById = new Map<string, YouMindFileSummary>();
+        let failedBoardCount = 0;
+        for (const [index, boardResult] of boardResults.entries()) {
+          if (boardResult.status === "rejected") {
+            failedBoardCount += 1;
+            continue;
+          }
+          for (const file of boardResult.value) {
+            filesById.set(file.id, { ...file, boardName: boards[index]?.name });
+          }
+        }
+        if (failedBoardCount === boards.length) {
+          throw boardResults.find((result) => result.status === "rejected")?.reason
+            ?? new Error("读取 YouMind 文件失败。");
+        }
+        const files = [...filesById.values()];
+        setYouMindFiles(files);
+        setYouMindFilesStatus("ready");
+        const syncMessage = failedBoardCount
+          ? `已自动同步 ${boards.length - failedBoardCount}/${boards.length} 个 Board，共 ${files.length} 个 article 文档。`
+          : `已自动同步 ${boards.length} 个 Board，共 ${files.length} 个 article 文档。`;
+        setYouMindFilesMessage(syncMessage);
+        setStatus("ready");
+        setMessage(syncMessage);
+      } else {
         setYouMindFiles([]);
         setYouMindFilesStatus("ready");
         setYouMindFilesMessage("当前账号没有可访问的 Board。");
+        setStatus("ready");
+        setMessage("YouMind 已连接，但当前账号没有可访问的 Board。");
       }
     } catch (error) {
       setYouMindBoards([]);
       setYouMindFiles([]);
       setYouMindFilesStatus("error");
-      setYouMindFilesMessage(error instanceof Error ? error.message : "读取 YouMind Board 失败。");
+      const errorMessage = error instanceof Error ? error.message : "读取 YouMind Board 失败。";
+      setYouMindFilesMessage(errorMessage);
+      setStatus("error");
+      setMessage(errorMessage);
     }
   };
 
@@ -760,7 +797,10 @@ export function ContentImportDemo() {
       setYouMindConnectStatus("idle");
       setStatus("ready");
       setMessage("YouMind 已连接，正在获取个人 Board 与文件列表。");
-      await loadYouMindBoards();
+      setImportEntryMode("workspace");
+      setSourceFilter("youmind");
+      setWorkspaceQuery("");
+      setShowConnections(false);
     } catch (error) {
       setYouMindConnectStatus("error");
       setStatus("error");
@@ -839,7 +879,7 @@ export function ContentImportDemo() {
       title: file.title,
       source: file.url || file.id,
       updatedAt: file.lastEditedAt,
-      meta: `${file.kind || "article"} · ${formatDocumentDate(file.lastEditedAt, "无更新时间")}`
+      meta: `${file.boardName ? `${file.boardName} · ` : ""}${file.kind || "article"} · ${formatDocumentDate(file.lastEditedAt, "无更新时间")}`
     })),
     ...(selectedGoogleDocument ? [{
       id: `googledocs-${selectedGoogleDocument.id}`,
@@ -1265,21 +1305,6 @@ export function ContentImportDemo() {
               </div>
             )}
           </div> : null}
-
-          {importEntryMode === "workspace" && provider === "youmind" && youMindConnection.connected && youMindBoards.length ? (
-            <label className="import-board-select">
-              <span>当前 YouMind Board</span>
-              <select
-                value={youMindBoardId}
-                onChange={(event) => {
-                  setYouMindBoardId(event.target.value);
-                  void loadYouMindFiles(event.target.value, "");
-                }}
-              >
-                {youMindBoards.map((board) => <option value={board.id} key={board.id}>{board.name}</option>)}
-              </select>
-            </label>
-          ) : null}
 
           <div className={`import-feedback import-library-feedback ${status}`} role="status" aria-live="polite">
             <span>{statusIcon(status)}</span>
